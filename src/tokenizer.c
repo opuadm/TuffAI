@@ -4,6 +4,41 @@
 #include <stdlib.h>
 #include <ctype.h>
 
+static int char_category_hash(const char *word) {
+    int i;
+    int vowels = 0, consonants = 0, digits = 0;
+    unsigned char c;
+
+    for (i = 0; word[i]; i++) {
+        c = (unsigned char)tolower((unsigned char)word[i]);
+        if (c == 'a' || c == 'e' || c == 'i' || c == 'o' || c == 'u')
+            vowels++;
+        else if (c >= 'a' && c <= 'z')
+            consonants++;
+        else if (c >= '0' && c <= '9')
+            digits++;
+    }
+    return (vowels * 137 + consonants * 251 + digits * 397) % ACTUAL_VOCAB;
+}
+
+static int reverse_hash(const char *word) {
+    unsigned h = 5381;
+    int len = (int)strlen(word);
+    int i;
+
+    for (i = len - 1; i >= 0; i--)
+        h = h * 33 ^ (unsigned char)word[i];
+    return (int)(h % ACTUAL_VOCAB);
+}
+
+static int weighted_rand(int center, int spread) {
+    int offset;
+
+    offset = (rand() % (spread * 2 + 1)) - spread;
+    offset += (rand() % (spread + 1)) - spread / 2;
+    return (center + offset + ACTUAL_VOCAB) % ACTUAL_VOCAB;
+}
+
 static int has_substr(const char *hay, const char *needle) {
     char lhay[2048], lneedle[256];
     int i;
@@ -438,6 +473,18 @@ int tokenize(const char *input, int *tokens, int max_tok) {
     for (i = 0; i < nwords && count < max_tok; i++) {
         tokens[count++] = (int)(hash_word(words[i]) % ACTUAL_VOCAB);
 
+        if (rand() % 5 == 0 && count < max_tok) {
+            tokens[count++] = char_category_hash(words[i]);
+        }
+
+        if (rand() % 4 == 0 && count < max_tok) {
+            tokens[count++] = reverse_hash(words[i]);
+        }
+
+        if (rand() % 3 == 0 && count < max_tok) {
+            tokens[count++] = (int)(weighted_rand(hash_word(words[i]) % ACTUAL_VOCAB, ACTUAL_VOCAB / 8) % ACTUAL_VOCAB);
+        }
+
         if (rand() % 3 == 0 && count < max_tok) {
             nsyl = split_syllables(words[i], syllables, 8);
             for (j = 0; j < nsyl && count < max_tok; j++) {
@@ -460,6 +507,10 @@ int tokenize(const char *input, int *tokens, int max_tok) {
             } else {
                 tokens[count++] = (int)(hash_word(code) % ACTUAL_VOCAB);
             }
+        }
+
+        if (rand() % 6 == 0 && i > 0 && count < max_tok) {
+            tokens[count++] = (int)((hash_word(words[i]) ^ hash_word(words[rand() % nwords])) % ACTUAL_VOCAB);
         }
     }
 

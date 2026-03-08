@@ -4,6 +4,45 @@
 #include <math.h>
 #include <time.h>
 
+#if defined(__SSE__) || defined(_M_IX86) || defined(_M_X64)
+#define USE_SSE 1
+#include <xmmintrin.h>
+#endif
+
+#ifdef USE_SSE
+static float dot_sse(const float *a, const float *b, int n) {
+    __m128 sum0 = _mm_setzero_ps();
+    __m128 sum1 = _mm_setzero_ps();
+    int i;
+    float result;
+
+    for (i = 0; i + 7 < n; i += 8) {
+        sum0 = _mm_add_ps(sum0, _mm_mul_ps(_mm_loadu_ps(a + i), _mm_loadu_ps(b + i)));
+        sum1 = _mm_add_ps(sum1, _mm_mul_ps(_mm_loadu_ps(a + i + 4), _mm_loadu_ps(b + i + 4)));
+    }
+    sum0 = _mm_add_ps(sum0, sum1);
+    for (; i + 3 < n; i += 4)
+        sum0 = _mm_add_ps(sum0, _mm_mul_ps(_mm_loadu_ps(a + i), _mm_loadu_ps(b + i)));
+    sum0 = _mm_add_ps(sum0, _mm_movehl_ps(sum0, sum0));
+    sum0 = _mm_add_ss(sum0, _mm_shuffle_ps(sum0, sum0, 1));
+    _mm_store_ss(&result, sum0);
+    for (; i < n; i++) result += a[i] * b[i];
+    return result;
+}
+
+static void axpy_sse(float *dst, const float *src, float scale, int n) {
+    __m128 vs = _mm_set1_ps(scale);
+    int i;
+
+    for (i = 0; i + 3 < n; i += 4) {
+        __m128 d = _mm_loadu_ps(dst + i);
+        __m128 s = _mm_loadu_ps(src + i);
+        _mm_storeu_ps(dst + i, _mm_add_ps(d, _mm_mul_ps(s, vs)));
+    }
+    for (; i < n; i++) dst[i] += src[i] * scale;
+}
+#endif
+
 float embeddings[ACTUAL_VOCAB][EMBED_DIM];
 float W1[EMBED_DIM * 3][HIDDEN];
 float b1[HIDDEN];
@@ -47,12 +86,18 @@ void encode_context(const int *tokens, int n, float *ctx) {
     w = 1.0f;
     tw = 0.0f;
     for (i = n - 1; i >= 0 && i >= n - 8; i--) {
+#ifdef USE_SSE
+        axpy_sse(ctx, embeddings[tokens[i]], w, EMBED_DIM);
+#else
         for (d = 0; d < EMBED_DIM; d++) ctx[d] += embeddings[tokens[i]][d] * w;
+#endif
         tw += w;
         w *= 0.65f;
     }
-    if (tw > 0)
-        for (d = 0; d < EMBED_DIM; d++) ctx[d] /= tw;
+    if (tw > 0) {
+        float inv_tw = 1.0f / tw;
+        for (d = 0; d < EMBED_DIM; d++) ctx[d] *= inv_tw;
+    }
 }
 
 void next_embed(const float *ctx, const float *prev, const float *feat_ctx, float *out) {
@@ -104,8 +149,12 @@ int sample_vocab(const float *target, float temperature, float noise,
     if (eff_noise < 0.5f) eff_noise = 0.5f;
 
     for (i = 0; i < ACTUAL_VOCAB; i++) {
+#ifdef USE_SSE
+        dot = dot_sse(target, embeddings[i], EMBED_DIM);
+#else
         dot = 0;
         for (d = 0; d < EMBED_DIM; d++) dot += target[d] * embeddings[i][d];
+#endif
 
         rep_count = 0;
         appeared = 0;

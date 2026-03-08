@@ -1,24 +1,38 @@
+#define _POSIX_C_SOURCE 200809L
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
 #include <time.h>
 #include <ctype.h>
+#include <signal.h>
 #include <ncurses.h>
 #include "knowledge/knowledge.h"
 #include "net.h"
 #include "features.h"
 #include "tokenizer.h"
 #include "corpus.h"
+#include "wikifetch.h"
 #include "version.h"
 
 #define INPUT_MAX 512
 #define CHAT_LINES 4096
 #define CHAT_LINE_LEN 512
 
+#define COLOR_USER 1
+#define COLOR_AI 2
+#define COLOR_THINK 3
+#define COLOR_STATUS 4
+#define COLOR_CMD 5
+
 static char chat_log[CHAT_LINES][CHAT_LINE_LEN];
+static int chat_colors[CHAT_LINES];
 static int chat_count = 0;
 static int chat_scroll = 0;
+static int total_tokens = 0;
+static int turn_count = 0;
+static volatile int got_sigwinch = 0;
+static volatile int got_sigint = 0;
 
 static char hist_buf[HIST_MAX][HIST_LEN];
 static int hist_tokens[HIST_MAX][MAX_TOKENS];
@@ -32,6 +46,29 @@ static float cfg_rep_penalty = 19.0f;
 static int cfg_max_words = 0;
 static float cfg_top_p = 0.02f;
 static float cfg_presence_penalty = 10.0f;
+
+#define TOPIC_TRACK_MAX 32
+#define TOPIC_WORD_LEN 64
+#define ABSORBED_MAX 32
+#define PREV_RESPONSE_MAX 8
+#define PREV_RESPONSE_LEN 512
+
+static char topic_words[TOPIC_TRACK_MAX][TOPIC_WORD_LEN];
+static int topic_counts[TOPIC_TRACK_MAX];
+static int topic_n = 0;
+
+static char obsession_word[TOPIC_WORD_LEN];
+static int obsession_strength = 0;
+
+static char absorbed_words[ABSORBED_MAX][TOPIC_WORD_LEN];
+static int absorbed_n = 0;
+
+static char prev_responses[PREV_RESPONSE_MAX][PREV_RESPONSE_LEN];
+static int prev_resp_count = 0;
+
+#define SELF_CTX_MAX 256
+static int self_ctx_tokens[SELF_CTX_MAX];
+static int self_ctx_len = 0;
 
 typedef struct {
     const char *name;
@@ -71,11 +108,27 @@ static void chat_add(const char *line) {
     if (len >= CHAT_LINE_LEN) len = CHAT_LINE_LEN - 1;
     memcpy(chat_log[slot], line, len);
     chat_log[slot][len] = '\0';
+    chat_colors[slot] = 0;
     chat_count++;
     chat_scroll = 0;
 }
 
-static void chat_add_wrapped(const char *prefix, const char *text) {
+static void chat_add_c(const char *line, int color) {
+    int slot;
+    int len;
+
+    if (!line || !line[0]) return;
+    slot = chat_count % CHAT_LINES;
+    len = (int)strlen(line);
+    if (len >= CHAT_LINE_LEN) len = CHAT_LINE_LEN - 1;
+    memcpy(chat_log[slot], line, len);
+    chat_log[slot][len] = '\0';
+    chat_colors[slot] = color;
+    chat_count++;
+    chat_scroll = 0;
+}
+
+static void chat_add_wrapped(const char *prefix, const char *text, int color) {
     char line[CHAT_LINE_LEN];
     int max_w;
     int tlen;
@@ -111,7 +164,7 @@ static void chat_add_wrapped(const char *prefix, const char *text) {
                 }
             }
             snprintf(line, sizeof(line), "%s%.*s", prefix, cut, text + pos);
-            chat_add(line);
+            chat_add_c(line, color);
             pos += cut;
             first = 0;
         } else {
@@ -130,7 +183,7 @@ static void chat_add_wrapped(const char *prefix, const char *text) {
                 }
             }
             snprintf(line, sizeof(line), "%.*s", cut, text + pos);
-            chat_add(line);
+            chat_add_c(line, color);
             pos += cut;
         }
         if (pos < tlen && text[pos] == '\n') {
@@ -146,31 +199,43 @@ static void draw_chat(void) {
     int chat_rows;
     int start;
     int i, line_idx;
+    int cpair;
 
     getmaxyx(stdscr, rows, cols);
-    chat_rows = rows - 3;
+
+    move(0, 0);
+    attron(A_BOLD | COLOR_PAIR(COLOR_STATUS));
+    for (i = 0; i < cols; i++) addch(' ');
+    mvprintw(0, 1, " %s %s | Model: %s",
+        TUFFAI_NAME, TUFFAI_VERSION, models[current_model].name);
+    attroff(A_BOLD | COLOR_PAIR(COLOR_STATUS));
+
+    chat_rows = rows - 4;
     if (chat_rows < 1) chat_rows = 1;
 
     start = chat_count - chat_rows - chat_scroll;
     if (start < 0) start = 0;
 
     for (i = 0; i < chat_rows; i++) {
-        move(i, 0);
+        move(i + 1, 0);
         clrtoeol();
         line_idx = start + i;
         if (line_idx >= 0 && line_idx < chat_count) {
-            mvaddnstr(i, 0, chat_log[line_idx % CHAT_LINES], cols - 1);
+            cpair = chat_colors[line_idx % CHAT_LINES];
+            if (cpair > 0) attron(COLOR_PAIR(cpair));
+            mvaddnstr(i + 1, 0, chat_log[line_idx % CHAT_LINES], cols - 1);
+            if (cpair > 0) attroff(COLOR_PAIR(cpair));
         }
     }
 
-    move(chat_rows, 0);
-    attron(A_REVERSE);
+    move(chat_rows + 1, 0);
+    attron(A_REVERSE | COLOR_PAIR(COLOR_STATUS));
     for (i = 0; i < cols; i++) addch(' ');
-    mvprintw(chat_rows, 1,
-        " T:%.1f N:%.1f FP:%.1f RP:%.1f TP:%.2f PP:%.1f ",
-        cfg_temp, cfg_noise, cfg_freq_penalty, cfg_rep_penalty,
-        cfg_top_p, cfg_presence_penalty);
-    attroff(A_REVERSE);
+    mvprintw(chat_rows + 1, 1,
+        " Tokens:%d Turns:%d | T:%.1f N:%.1f FP:%.1f RP:%.1f TP:%.2f ",
+        total_tokens, turn_count, cfg_temp, cfg_noise,
+        cfg_freq_penalty, cfg_rep_penalty, cfg_top_p);
+    attroff(A_REVERSE | COLOR_PAIR(COLOR_STATUS));
 }
 
 static void draw_input(const char *buf, int cursor) {
@@ -323,7 +388,7 @@ static int handle_command(const char *cmd) {
     if (n < 1) return 0;
 
     if (strcmp(name, "/help") == 0) {
-        chat_add("--- Commands ---");
+        chat_add_c("--- Commands ---", COLOR_CMD);
         chat_add("/temp <val>    - set temperature (default 6.0)");
         chat_add("/noise <val>   - set noise level (default 4.5)");
         chat_add("/freq <val>    - frequency penalty (default 3.5)");
@@ -332,8 +397,33 @@ static int handle_command(const char *cmd) {
         chat_add("/presence <val>- presence penalty (default 0.0)");
         chat_add("/maxwords <val>- override max response words (0=auto)");
         chat_add("/model [name]  - list models or switch model");
+        chat_add("/wikifetch     - toggle wiki fetching on/off");
+        chat_add("/stats         - show session statistics");
         chat_add("/clear         - clear chat history");
         chat_add("/quit          - exit");
+        return 1;
+    }
+
+    if (strcmp(name, "/stats") == 0) {
+        chat_add_c("--- Session Stats ---", COLOR_CMD);
+        snprintf(model_line, sizeof(model_line), "Model: %s", models[current_model].name);
+        chat_add(model_line);
+        snprintf(model_line, sizeof(model_line), "Total turns: %d", turn_count);
+        chat_add(model_line);
+        snprintf(model_line, sizeof(model_line), "Total tokens: %d", total_tokens);
+        chat_add(model_line);
+        snprintf(model_line, sizeof(model_line), "History entries: %d", hist_cnt);
+        chat_add(model_line);
+        snprintf(model_line, sizeof(model_line), "Topics tracked: %d", topic_n);
+        chat_add(model_line);
+        snprintf(model_line, sizeof(model_line), "Absorbed words: %d", absorbed_n);
+        chat_add(model_line);
+        snprintf(model_line, sizeof(model_line), "Wiki: %s", wiki_enabled() ? "enabled" : "disabled");
+        chat_add(model_line);
+        if (obsession_word[0]) {
+            snprintf(model_line, sizeof(model_line), "Obsession: \"%s\" (strength: %d)", obsession_word, obsession_strength);
+            chat_add(model_line);
+        }
         return 1;
     }
 
@@ -379,6 +469,17 @@ static int handle_command(const char *cmd) {
         return 1;
     }
 
+    if (strcmp(name, "/wikifetch") == 0) {
+        if (wiki_enabled()) {
+            wiki_set_enabled(0);
+            chat_add("Wiki fetching disabled.");
+        } else {
+            wiki_set_enabled(1);
+            chat_add("Wiki fetching enabled.");
+        }
+        return 1;
+    }
+
     if (n < 2) {
         chat_add("Missing argument. Type /help for usage.");
         return 1;
@@ -386,44 +487,44 @@ static int handle_command(const char *cmd) {
 
     if (strcmp(name, "/temp") == 0) {
         val = (float)atof(arg);
-        if (val > 0.01f && val < 100.0f) {
+        if (val > 0.001f && val <= 10000.0f) {
             cfg_temp = val;
             chat_add("Temperature set.");
         } else {
-            chat_add("Invalid value (0.01 - 100).");
+            chat_add("Invalid value (0.001 - 10000).");
         }
         return 1;
     }
 
     if (strcmp(name, "/noise") == 0) {
         val = (float)atof(arg);
-        if (val >= 0.0f && val < 100.0f) {
+        if (val >= 0.0f && val <= 10000.0f) {
             cfg_noise = val;
             chat_add("Noise set.");
         } else {
-            chat_add("Invalid value (0 - 100).");
+            chat_add("Invalid value (0 - 10000).");
         }
         return 1;
     }
 
     if (strcmp(name, "/freq") == 0) {
         val = (float)atof(arg);
-        if (val >= 0.0f && val < 50.0f) {
+        if (val >= 0.0f && val <= 1000.0f) {
             cfg_freq_penalty = val;
             chat_add("Frequency penalty set.");
         } else {
-            chat_add("Invalid value (0 - 50).");
+            chat_add("Invalid value (0 - 1000).");
         }
         return 1;
     }
 
     if (strcmp(name, "/rep") == 0) {
         val = (float)atof(arg);
-        if (val >= 0.0f && val < 20.0f) {
+        if (val >= 0.0f && val <= 1000.0f) {
             cfg_rep_penalty = val;
             chat_add("Repetition penalty set.");
         } else {
-            chat_add("Invalid value (0 - 20).");
+            chat_add("Invalid value (0 - 1000).");
         }
         return 1;
     }
@@ -441,18 +542,18 @@ static int handle_command(const char *cmd) {
 
     if (strcmp(name, "/presence") == 0) {
         val = (float)atof(arg);
-        if (val >= -10.0f && val <= 10.0f) {
+        if (val >= -1000.0f && val <= 1000.0f) {
             cfg_presence_penalty = val;
             chat_add("Presence penalty set.");
         } else {
-            chat_add("Invalid value (-10 - 10).");
+            chat_add("Invalid value (-1000 - 1000).");
         }
         return 1;
     }
 
     if (strcmp(name, "/maxwords") == 0) {
         n = atoi(arg);
-        if (n >= 0 && n <= 5000) {
+        if (n >= 0 && n <= 100000) {
             cfg_max_words = n;
             if (n == 0) {
                 chat_add("Max words set to auto.");
@@ -460,13 +561,270 @@ static int handle_command(const char *cmd) {
                 chat_add("Max words override set.");
             }
         } else {
-            chat_add("Invalid value (0-5000, 0=auto).");
+            chat_add("Invalid value (0-100000, 0=auto).");
         }
         return 1;
     }
 
     chat_add("Unknown command. Type /help for usage.");
     return 1;
+}
+
+static int is_common_word(const char *w) {
+    static const char *common[] = {
+        "the","a","an","is","it","was","are","am","be","have","has",
+        "do","does","did","will","would","could","should","can",
+        "i","you","we","they","he","she","me","my","your","our",
+        "this","that","what","which","who","when","where","why","how",
+        "if","but","and","or","not","no","yes","so","very","too",
+        "for","from","with","about","to","of","in","on","at","by",
+        "up","down","out","off","tell","show","please","want","like",
+        "know","think","say","make","get","go","just","also",
+        NULL
+    };
+    char lower[64];
+    int i;
+    int len;
+
+    len = (int)strlen(w);
+    if (len >= 63 || len < 3) return 1;
+    for (i = 0; i < len; i++) lower[i] = (char)tolower((unsigned char)w[i]);
+    lower[len] = '\0';
+    for (i = 0; common[i]; i++) {
+        if (strcmp(lower, common[i]) == 0) return 1;
+    }
+    return 0;
+}
+
+static void track_topic(const char *input) {
+    char buf[512];
+    char *words[64];
+    int nwords = 0;
+    char *p;
+    int i, j, found;
+    int best_idx;
+    int best_count;
+    int wlen;
+
+    strncpy(buf, input, 511);
+    buf[511] = '\0';
+    p = strtok(buf, " \t\n.,!?;:'\"()[]{}");
+    while (p && nwords < 64) {
+        if (!is_common_word(p)) words[nwords++] = p;
+        p = strtok(NULL, " \t\n.,!?;:'\"()[]{}");
+    }
+
+    for (i = 0; i < nwords; i++) {
+        found = -1;
+        for (j = 0; j < topic_n; j++) {
+            if (str_casecmp(topic_words[j], words[i]) == 0) {
+                found = j;
+                break;
+            }
+        }
+        if (found >= 0) {
+            topic_counts[found]++;
+        } else if (topic_n < TOPIC_TRACK_MAX) {
+            wlen = (int)strlen(words[i]);
+            if (wlen >= TOPIC_WORD_LEN) wlen = TOPIC_WORD_LEN - 1;
+            memcpy(topic_words[topic_n], words[i], wlen);
+            topic_words[topic_n][wlen] = '\0';
+            topic_counts[topic_n] = 1;
+            topic_n++;
+        }
+    }
+
+    best_idx = -1;
+    best_count = 1;
+    for (i = 0; i < topic_n; i++) {
+        if (topic_counts[i] > best_count) {
+            best_count = topic_counts[i];
+            best_idx = i;
+        }
+    }
+
+    if (best_idx >= 0 && best_count >= 2) {
+        strncpy(obsession_word, topic_words[best_idx], TOPIC_WORD_LEN - 1);
+        obsession_word[TOPIC_WORD_LEN - 1] = '\0';
+        obsession_strength = best_count;
+    }
+}
+
+static void absorb_words(const char *input) {
+    char buf[512];
+    char *words[64];
+    int nwords = 0;
+    char *p;
+    int i, j, found;
+    int wlen;
+
+    strncpy(buf, input, 511);
+    buf[511] = '\0';
+    p = strtok(buf, " \t\n.,!?;:'\"()[]{}");
+    while (p && nwords < 64) {
+        words[nwords++] = p;
+        p = strtok(NULL, " \t\n.,!?;:'\"()[]{}");
+    }
+
+    for (i = 0; i < nwords; i++) {
+        wlen = (int)strlen(words[i]);
+        if (wlen < 5) continue;
+        if (is_common_word(words[i])) continue;
+
+        found = 0;
+        for (j = 0; j < absorbed_n; j++) {
+            if (str_casecmp(absorbed_words[j], words[i]) == 0) {
+                found = 1;
+                break;
+            }
+        }
+        if (!found && rand() % 4 == 0) {
+            if (absorbed_n >= ABSORBED_MAX) {
+                absorbed_n = ABSORBED_MAX - 1;
+                memmove(absorbed_words[0], absorbed_words[1],
+                    (ABSORBED_MAX - 1) * TOPIC_WORD_LEN);
+            }
+            if (wlen >= TOPIC_WORD_LEN) wlen = TOPIC_WORD_LEN - 1;
+            memcpy(absorbed_words[absorbed_n], words[i], wlen);
+            absorbed_words[absorbed_n][wlen] = '\0';
+            absorbed_n++;
+        }
+    }
+}
+
+static void save_response(const char *response) {
+    int slot;
+    int len;
+
+    slot = prev_resp_count % PREV_RESPONSE_MAX;
+    len = (int)strlen(response);
+    if (len >= PREV_RESPONSE_LEN) len = PREV_RESPONSE_LEN - 1;
+    memcpy(prev_responses[slot], response, len);
+    prev_responses[slot][len] = '\0';
+    prev_resp_count++;
+}
+
+static void inject_obsession(char *buf, int buf_size) {
+    char tmp[8192];
+    char *words[256];
+    int nwords = 0;
+    char *p;
+    int i, written;
+    int inject_at;
+    int obslen;
+
+    if (obsession_strength < 2 || !obsession_word[0]) return;
+    if (rand() % 100 >= 20 + obsession_strength * 10) return;
+
+    strncpy(tmp, buf, sizeof(tmp) - 1);
+    tmp[sizeof(tmp) - 1] = '\0';
+    p = strtok(tmp, " ");
+    while (p && nwords < 256) {
+        words[nwords++] = p;
+        p = strtok(NULL, " ");
+    }
+    if (nwords < 3) return;
+
+    obslen = (int)strlen(obsession_word);
+    inject_at = rand() % nwords;
+    written = 0;
+
+    for (i = 0; i < nwords && written < buf_size - obslen - 10; i++) {
+        if (i == inject_at) {
+            if (written > 0) buf[written++] = ' ';
+            if (rand() % 2 == 0) {
+                memcpy(buf + written, obsession_word, obslen);
+                written += obslen;
+                buf[written++] = ' ';
+            } else {
+                written += snprintf(buf + written, buf_size - written,
+                    "(wait, %s?) ", obsession_word);
+            }
+        }
+        if (written > 0) buf[written++] = ' ';
+        written += snprintf(buf + written, buf_size - written, "%s", words[i]);
+    }
+    buf[written] = '\0';
+}
+
+static void inject_absorbed(char *buf, int buf_size) {
+    char suffix[256];
+    int slen;
+    int blen;
+    int pick;
+
+    if (absorbed_n == 0) return;
+    if (rand() % 100 >= 15) return;
+
+    pick = rand() % absorbed_n;
+    switch (rand() % 4) {
+    case 0:
+        snprintf(suffix, sizeof(suffix), " (much like %s)", absorbed_words[pick]);
+        break;
+    case 1:
+        snprintf(suffix, sizeof(suffix), " which is basically %s", absorbed_words[pick]);
+        break;
+    case 2:
+        snprintf(suffix, sizeof(suffix), ", or as they say, %s", absorbed_words[pick]);
+        break;
+    default:
+        snprintf(suffix, sizeof(suffix), " -- %s --", absorbed_words[pick]);
+        break;
+    }
+
+    slen = (int)strlen(suffix);
+    blen = (int)strlen(buf);
+    if (blen + slen < buf_size - 1) {
+        memcpy(buf + blen, suffix, slen);
+        buf[blen + slen] = '\0';
+    }
+}
+
+static void inject_contradiction(char *buf, int buf_size) {
+    int old_slot;
+    char fragment[128];
+    int flen, blen;
+    int old_len, cut;
+    char prefix[64];
+    int plen;
+
+    if (prev_resp_count < 2) return;
+    if (rand() % 100 >= 12) return;
+
+    old_slot = rand() % (prev_resp_count < PREV_RESPONSE_MAX ? prev_resp_count : PREV_RESPONSE_MAX);
+    old_len = (int)strlen(prev_responses[old_slot]);
+    if (old_len < 10) return;
+
+    cut = old_len > 80 ? 80 : old_len;
+    while (cut > 0 && prev_responses[old_slot][cut] != ' ') cut--;
+    if (cut <= 0) cut = old_len > 80 ? 80 : old_len;
+    memcpy(fragment, prev_responses[old_slot], cut);
+    fragment[cut] = '\0';
+
+    switch (rand() % 4) {
+    case 0:
+        snprintf(prefix, sizeof(prefix), " Actually wait, I take that back. ");
+        break;
+    case 1:
+        snprintf(prefix, sizeof(prefix), " No, ignore what I said before about ");
+        break;
+    case 2:
+        snprintf(prefix, sizeof(prefix), " (Correction: unlike when I said ");
+        break;
+    default:
+        snprintf(prefix, sizeof(prefix), " But earlier I was wrong about ");
+        break;
+    }
+
+    plen = (int)strlen(prefix);
+    flen = (int)strlen(fragment);
+    blen = (int)strlen(buf);
+
+    if (blen + plen + flen + 2 < buf_size) {
+        memcpy(buf + blen, prefix, plen);
+        memcpy(buf + blen + plen, fragment, flen);
+        buf[blen + plen + flen] = '\0';
+    }
 }
 
 static void show_status(const char *msg) {
@@ -483,6 +841,40 @@ static void show_status(const char *msg) {
     attroff(A_DIM);
     refresh();
     (void)cols;
+}
+
+static void sleep_with_scroll(int ms) {
+    int elapsed = 0;
+    int ch;
+    int chunk;
+
+    timeout(20);
+    while (elapsed < ms) {
+        ch = getch();
+        if (ch == KEY_UP) {
+            if (chat_scroll < chat_count - 1) chat_scroll++;
+            draw_chat();
+            refresh();
+        } else if (ch == KEY_DOWN) {
+            if (chat_scroll > 0) chat_scroll--;
+            draw_chat();
+            refresh();
+        } else if (ch == KEY_PPAGE) {
+            chat_scroll += 10;
+            if (chat_scroll > chat_count - 1) chat_scroll = chat_count - 1;
+            draw_chat();
+            refresh();
+        } else if (ch == KEY_NPAGE) {
+            chat_scroll -= 10;
+            if (chat_scroll < 0) chat_scroll = 0;
+            draw_chat();
+            refresh();
+        }
+        chunk = (ms - elapsed) < 20 ? (ms - elapsed) : 20;
+        if (ch == ERR) napms(chunk);
+        elapsed += 20;
+    }
+    timeout(-1);
 }
 
 static void generate_response(const char *input) {
@@ -519,10 +911,17 @@ static void generate_response(const char *input) {
     int unicode_chance;
     float temp_mode_bias;
     const char *user_match;
+    int resp_ids[SELF_CTX_MAX];
+    int resp_ids_n;
 
     prev_word = rand() % ACTUAL_VOCAB;
 
+    curs_set(0);
     show_status("Thinking...");
+    turn_count++;
+
+    track_topic(input);
+    absorb_words(input);
 
     personality_temp_mult = 1.0f + (float)hist_cnt * 0.04f;
     personality_noise_mult = 1.0f + (float)hist_cnt * 0.06f;
@@ -563,6 +962,8 @@ static void generate_response(const char *input) {
         }
     }
 
+    total_tokens += cur_len;
+
     mixed_n = cur_len < MAX_TOKENS ? cur_len : MAX_TOKENS;
     memcpy(mixed, cur_tokens, mixed_n * sizeof(int));
 
@@ -576,6 +977,15 @@ static void generate_response(const char *input) {
     }
 
     inject_history_chaos(mixed, &mixed_n, MAX_TOKENS * 4);
+
+    if (self_ctx_len > 0) {
+        add = self_ctx_len;
+        if (mixed_n + add < MAX_TOKENS * 4) {
+            memcpy(mixed + mixed_n, self_ctx_tokens, add * sizeof(int));
+            mixed_n += add;
+        }
+    }
+
     hist_push(input, cur_tokens, cur_len);
     reset_recent();
     encode_context(mixed, mixed_n, ctx);
@@ -616,6 +1026,22 @@ static void generate_response(const char *input) {
     }
 
     {
+        static const char *think_connectors[] = {
+            "hmm", "wait", "actually", "no", "but", "so", "therefore",
+            "unless", "considering", "however", "indeed", "perhaps",
+            "fundamentally", "interestingly", "okay", "right", "well",
+            "let me think", "on second thought", "basically", "clearly",
+            "obviously", "I recall", "it seems", "the thing is",
+            "now", "then again", "hold on", "yes", "ah"
+        };
+        static const char *think_fillers[] = {
+            "this means", "which implies", "if we consider",
+            "from what I know", "that reminds me", "in other words",
+            "the key point is", "wait no", "scratch that",
+            "going back to", "the real question is",
+            "let me reconsider", "I think", "so basically",
+            "putting it together", "on reflection"
+        };
         int think_words;
         int think_line_words;
         int think_wb;
@@ -627,8 +1053,32 @@ static void generate_response(const char *input) {
         int think_word_id;
         const char *think_w;
         int think_wlen;
+        char input_keyword[128];
+        int phase;
+        int phase_len;
+        int connector_countdown;
+        int inject_keyword_countdown;
+        int n_connectors;
+        int n_fillers;
+        int think_ids[SELF_CTX_MAX];
+        int think_ids_n;
 
-        think_words = 50 + rand() % 40;
+        n_connectors = (int)(sizeof(think_connectors) / sizeof(think_connectors[0]));
+        n_fillers = (int)(sizeof(think_fillers) / sizeof(think_fillers[0]));
+
+        extract_keyword_ext(input, input_keyword, sizeof(input_keyword));
+        think_ids_n = 0;
+
+        think_words = 200 + rand() % 300;
+        if (pattern == PAT_MATH || pattern == PAT_TECH || pattern == PAT_CODE)
+            think_words += 100 + rand() % 150;
+        if (pattern == PAT_QUESTION)
+            think_words += 60 + rand() % 100;
+        if (feat.entropy > 0.6f)
+            think_words += 80;
+        if (rand() % 10 == 0)
+            think_words += 150 + rand() % 250;
+
         think_line_words = 0;
         think_wb = 0;
 
@@ -643,19 +1093,72 @@ static void generate_response(const char *input) {
         think_line[3] = ' ';
         think_wb = 4;
 
+        phase = 0;
+        phase_len = 15 + rand() % 20;
+        connector_countdown = 5 + rand() % 8;
+        inject_keyword_countdown = 8 + rand() % 12;
+
         for (step = 0; step < think_words; step++) {
+            if (connector_countdown <= 0 && think_wb < (int)sizeof(think_line) - 60) {
+                const char *conn;
+                int clen;
+
+                if (phase == 0 || rand() % 3 == 0)
+                    conn = think_connectors[rand() % n_connectors];
+                else
+                    conn = think_fillers[rand() % n_fillers];
+
+                clen = (int)strlen(conn);
+                if (think_wb > 4) {
+                    if (rand() % 3 == 0) {
+                        think_line[think_wb++] = '.';
+                        think_line[think_wb++] = '.';
+                        think_line[think_wb++] = '.';
+                    } else {
+                        think_line[think_wb++] = ',';
+                    }
+                    think_line[think_wb++] = ' ';
+                }
+                if (think_wb + clen < (int)sizeof(think_line) - 2) {
+                    memcpy(think_line + think_wb, conn, clen);
+                    think_wb += clen;
+                }
+                think_line_words++;
+                connector_countdown = 6 + rand() % 12;
+            }
+
+            if (inject_keyword_countdown <= 0 && think_wb < (int)sizeof(think_line) - 60) {
+                int klen = (int)strlen(input_keyword);
+                if (think_wb > 4)
+                    think_line[think_wb++] = ' ';
+                if (rand() % 3 == 0 && think_wb + 2 + klen < (int)sizeof(think_line) - 2) {
+                    think_line[think_wb++] = '"';
+                    memcpy(think_line + think_wb, input_keyword, klen);
+                    think_wb += klen;
+                    think_line[think_wb++] = '"';
+                } else if (think_wb + klen < (int)sizeof(think_line) - 2) {
+                    memcpy(think_line + think_wb, input_keyword, klen);
+                    think_wb += klen;
+                }
+                think_line_words++;
+                inject_keyword_countdown = 10 + rand() % 18;
+            }
+
             next_embed(think_ctx, think_prev, feat_ctx, think_target);
             derail_embed(think_target, step, think_words);
 
             for (d = 0; d < EMBED_DIM; d++)
                 think_target[d] += frand_r() * (base_noise * 2.0f);
 
-            think_temp_val = base_temp * 1.5f;
+            think_temp_val = base_temp * (1.2f + (float)step / think_words * 0.8f);
             think_word_id = sample_vocab(think_target, think_temp_val, base_noise * 2.0f,
                                 cfg_freq_penalty, cfg_rep_penalty, cfg_top_p);
 
             think_w = vocab[think_word_id];
             think_wlen = (int)strlen(think_w);
+
+            if (think_ids_n < SELF_CTX_MAX)
+                think_ids[think_ids_n++] = think_word_id;
 
             if (think_wb > 4 && think_wb + 1 + think_wlen < (int)sizeof(think_line) - 2) {
                 think_line[think_wb++] = ' ';
@@ -671,29 +1174,42 @@ static void generate_response(const char *input) {
                 think_ctx[d] = think_ctx[d] * 0.6f + embeddings[think_word_id][d] * 0.4f;
 
             think_line_words++;
+            connector_countdown--;
+            inject_keyword_countdown--;
 
-            if (think_line_words >= 6 + rand() % 5) {
+            if (think_line_words >= 15 + rand() % 11) {
                 think_line[think_wb] = '\0';
-                chat_add(think_line);
+                chat_add_c(think_line, COLOR_THINK);
                 draw_chat();
                 refresh();
-                napms(60 + rand() % 150);
+                sleep_with_scroll(40 + rand() % 120);
                 think_wb = 4;
                 think_line[0] = ' ';
                 think_line[1] = ' ';
                 think_line[2] = '>';
                 think_line[3] = ' ';
                 think_line_words = 0;
+
+                phase_len--;
+                if (phase_len <= 0) {
+                    phase = (phase + 1) % 3;
+                    phase_len = 12 + rand() % 18;
+                }
             }
         }
 
         if (think_line_words > 0) {
             think_line[think_wb] = '\0';
-            chat_add(think_line);
+            chat_add_c(think_line, COLOR_THINK);
             draw_chat();
             refresh();
-            napms(60 + rand() % 150);
+            sleep_with_scroll(40 + rand() % 120);
         }
+
+        self_ctx_len = think_ids_n < SELF_CTX_MAX ? think_ids_n : SELF_CTX_MAX;
+        if (self_ctx_len > 0)
+            memcpy(self_ctx_tokens, think_ids, self_ctx_len * sizeof(int));
+        total_tokens += think_ids_n;
     }
 
     user_match = knowledge_match_user(&know_extra, input);
@@ -712,6 +1228,12 @@ static void generate_response(const char *input) {
     }
 
     if (used_corpus) {
+        if (resp_mode != RESP_CODE_GEN) {
+            inject_obsession(corpus_buf, sizeof(corpus_buf));
+            inject_absorbed(corpus_buf, sizeof(corpus_buf));
+            inject_contradiction(corpus_buf, sizeof(corpus_buf));
+        }
+
         unicode_chance = 15 + hist_cnt * 3 + (int)(cfg_noise * 3.0f);
         if (unicode_chance > 90) unicode_chance = 90;
         if (resp_mode != RESP_CODE_GEN && rand() % 100 < unicode_chance) {
@@ -720,17 +1242,21 @@ static void generate_response(const char *input) {
 
         if (resp_mode != RESP_CODE_GEN && cfg_noise > NOISE_BASE * 1.5f) {
             scramble_words(corpus_buf, word_buf, sizeof(word_buf));
-            chat_add_wrapped("TuffAI: ", word_buf);
+            save_response(word_buf);
+            chat_add_wrapped("TuffAI: ", word_buf, COLOR_AI);
         } else {
-            chat_add_wrapped("TuffAI: ", corpus_buf);
+            save_response(corpus_buf);
+            chat_add_wrapped("TuffAI: ", corpus_buf, COLOR_AI);
         }
         show_status("");
+        curs_set(1);
         return;
     }
 
     show_status("Generating...");
 
     wb_pos = 0;
+    resp_ids_n = 0;
     for (step = 0; step < max_words; step++) {
         next_embed(ctx, prev_embed, feat_ctx, target);
         derail_embed(target, step, max_words);
@@ -742,6 +1268,9 @@ static void generate_response(const char *input) {
         word = sample_vocab(target, step_temp, base_noise,
                             cfg_freq_penalty, cfg_rep_penalty, cfg_top_p);
         push_recent(word);
+
+        if (resp_ids_n < SELF_CTX_MAX)
+            resp_ids[resp_ids_n++] = word;
 
         w = vocab[word];
         wlen = (int)strlen(w);
@@ -761,8 +1290,14 @@ static void generate_response(const char *input) {
             ctx[d] = ctx[d] * 0.6f + embeddings[word][d] * 0.4f;
     }
 
+    total_tokens += max_words;
+
     word_buf[wb_pos++] = '.';
     word_buf[wb_pos] = '\0';
+
+    inject_obsession(word_buf, sizeof(word_buf));
+    inject_absorbed(word_buf, sizeof(word_buf));
+    inject_contradiction(word_buf, sizeof(word_buf));
 
     unicode_chance = 15 + hist_cnt * 3 + (int)(cfg_noise * 3.0f);
     if (unicode_chance > 90) unicode_chance = 90;
@@ -770,8 +1305,38 @@ static void generate_response(const char *input) {
         inject_unicode(word_buf, sizeof(word_buf));
     }
 
-    chat_add_wrapped("TuffAI: ", word_buf);
+    save_response(word_buf);
+    chat_add_wrapped("TuffAI: ", word_buf, COLOR_AI);
+
+    {
+        int combined;
+        int copy_len;
+
+        combined = self_ctx_len + resp_ids_n;
+        if (combined > SELF_CTX_MAX) {
+            copy_len = SELF_CTX_MAX - self_ctx_len;
+            if (copy_len < 0) copy_len = 0;
+        } else {
+            copy_len = resp_ids_n;
+        }
+        if (copy_len > 0) {
+            memcpy(self_ctx_tokens + self_ctx_len, resp_ids, copy_len * sizeof(int));
+            self_ctx_len += copy_len;
+        }
+    }
+
     show_status("");
+    curs_set(1);
+}
+
+static void handle_sigwinch(int sig) {
+    (void)sig;
+    got_sigwinch = 1;
+}
+
+static void handle_sigint(int sig) {
+    (void)sig;
+    got_sigint = 1;
 }
 
 int main(void) {
@@ -781,6 +1346,8 @@ int main(void) {
     int cmd_result;
     int running;
     char user_line[INPUT_MAX + 16];
+    struct sigaction sa_winch;
+    struct sigaction sa_int;
 
     net_init();
     initscr();
@@ -788,6 +1355,24 @@ int main(void) {
     keypad(stdscr, TRUE);
     noecho();
     scrollok(stdscr, FALSE);
+
+    if (has_colors()) {
+        start_color();
+        use_default_colors();
+        init_pair(COLOR_USER, COLOR_CYAN, -1);
+        init_pair(COLOR_AI, COLOR_GREEN, -1);
+        init_pair(COLOR_THINK, COLOR_YELLOW, -1);
+        init_pair(COLOR_STATUS, COLOR_WHITE, COLOR_BLUE);
+        init_pair(COLOR_CMD, COLOR_MAGENTA, -1);
+    }
+
+    memset(&sa_winch, 0, sizeof(sa_winch));
+    sa_winch.sa_handler = handle_sigwinch;
+    sigaction(SIGWINCH, &sa_winch, NULL);
+
+    memset(&sa_int, 0, sizeof(sa_int));
+    sa_int.sa_handler = handle_sigint;
+    sigaction(SIGINT, &sa_int, NULL);
 
     chat_add("");
     snprintf(input_buf, sizeof(input_buf), "%s %s", TUFFAI_NAME, TUFFAI_VERSION);
@@ -802,6 +1387,17 @@ int main(void) {
     running = 1;
 
     while (running) {
+        if (got_sigwinch) {
+            got_sigwinch = 0;
+            endwin();
+            refresh();
+            clear();
+        }
+        if (got_sigint) {
+            running = 0;
+            break;
+        }
+
         draw_chat();
         draw_input(input_buf, input_pos);
         refresh();
@@ -820,7 +1416,7 @@ int main(void) {
                 }
             } else {
                 snprintf(user_line, sizeof(user_line), "You: %s", input_buf);
-                chat_add(user_line);
+                chat_add_c(user_line, COLOR_USER);
                 generate_response(input_buf);
                 chat_add("");
             }

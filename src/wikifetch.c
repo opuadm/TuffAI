@@ -5,20 +5,32 @@
 #include <ctype.h>
 #include <curl/curl.h>
 
+static int wiki_runtime_enabled = 1;
+
+int wiki_enabled(void) {
+    return wiki_runtime_enabled;
+}
+
+void wiki_set_enabled(int enabled) {
+    wiki_runtime_enabled = enabled ? 1 : 0;
+}
+
 typedef struct {
     char *data;
     size_t size;
     size_t cap;
 } Buffer;
 
-static size_t write_cb(void *ptr, size_t size, size_t nmemb, void *userdata) {
-    Buffer *buf = (Buffer *)userdata;
+static size_t write_callback(void *contents, size_t size, size_t nmemb, void *userp) {
+    Buffer *buf = (Buffer *)userp;
     size_t total = size * nmemb;
-    size_t needed = buf->size + total + 1;
+    size_t needed;
+    size_t newcap;
+    char *tmp;
 
+    needed = buf->size + total + 1;
     if (needed > buf->cap) {
-        size_t newcap = buf->cap * 2;
-        char *tmp;
+        newcap = buf->cap * 2;
         if (newcap < needed) newcap = needed;
         if (newcap > 512 * 1024) return 0;
         tmp = realloc(buf->data, newcap);
@@ -26,7 +38,7 @@ static size_t write_cb(void *ptr, size_t size, size_t nmemb, void *userdata) {
         buf->data = tmp;
         buf->cap = newcap;
     }
-    memcpy(buf->data + buf->size, ptr, total);
+    memcpy(buf->data + buf->size, contents, total);
     buf->size += total;
     buf->data[buf->size] = '\0';
     return total;
@@ -79,11 +91,14 @@ static char *find_json_string(const char *json, const char *key) {
     return result;
 }
 
-static int do_fetch(const char *url, char *out, int out_size) {
+static int do_fetch(const char *host, const char *path, char *out, int out_size) {
     CURL *curl;
     CURLcode res;
     Buffer buf;
+    char url[1024];
     char *extract;
+
+    if (!wiki_runtime_enabled) return 0;
 
     buf.data = malloc(4096);
     if (!buf.data) return 0;
@@ -91,16 +106,20 @@ static int do_fetch(const char *url, char *out, int out_size) {
     buf.cap = 4096;
     buf.data[0] = '\0';
 
+    snprintf(url, sizeof(url), "https://%s%s", host, path);
+
     curl = curl_easy_init();
-    if (!curl) { free(buf.data); return 0; }
+    if (!curl) {
+        free(buf.data);
+        return 0;
+    }
 
     curl_easy_setopt(curl, CURLOPT_URL, url);
-    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_cb);
+    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_callback);
     curl_easy_setopt(curl, CURLOPT_WRITEDATA, &buf);
-    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 5L);
-    curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
     curl_easy_setopt(curl, CURLOPT_USERAGENT, "TuffAI/5.0 (DumbBot)");
-    curl_easy_setopt(curl, CURLOPT_PROTOCOLS_STR, "https");
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 10L);
+    curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
 
     res = curl_easy_perform(curl);
     curl_easy_cleanup(curl);
@@ -145,38 +164,40 @@ static void url_encode(const char *src, char *dst, int dst_size) {
 }
 
 int wiki_fetch_random(char *out, int out_size) {
+    if (!wiki_runtime_enabled) return 0;
     return do_fetch(
-        "https://en.wikipedia.org/api/rest_v1/page/random/summary",
+        "en.wikipedia.org",
+        "/api/rest_v1/page/random/summary",
         out, out_size);
 }
 
 static const char *wiki_lang_codes[] = {"en", "pl", "ru", "zh"};
 
 int wiki_fetch_random_lang(int lang, char *out, int out_size) {
-    char url[512];
-
+    char host[128];
+    if (!wiki_runtime_enabled) return 0;
     if (lang < 0 || lang >= WIKI_LANG_COUNT) lang = WIKI_LANG_EN;
-    snprintf(url, sizeof(url),
-        "https://%s.wikipedia.org/api/rest_v1/page/random/summary",
-        wiki_lang_codes[lang]);
-    return do_fetch(url, out, out_size);
+    snprintf(host, sizeof(host), "%s.wikipedia.org", wiki_lang_codes[lang]);
+    return do_fetch(host, "/api/rest_v1/page/random/summary", out, out_size);
 }
 
 int wiki_fetch_search_lang(const char *query, int lang, char *out, int out_size) {
-    char url[512];
+    char host[128];
+    char path[512];
     char encoded[256];
-    char buf[2048];
+    char qbuf[2048];
     char *words[32];
     int nwords = 0;
     int pick;
     char *p;
 
+    if (!wiki_runtime_enabled) return 0;
     if (lang < 0 || lang >= WIKI_LANG_COUNT) lang = WIKI_LANG_EN;
 
-    strncpy(buf, query, 2047);
-    buf[2047] = '\0';
+    strncpy(qbuf, query, 2047);
+    qbuf[2047] = '\0';
 
-    p = strtok(buf, " \t\n.,!?;:'\"()[]{}");
+    p = strtok(qbuf, " \t\n.,!?;:'\"()[]{}");
     while (p && nwords < 32) {
         if (strlen(p) > 2) words[nwords++] = p;
         p = strtok(NULL, " \t\n.,!?;:'\"()[]{}");
@@ -189,34 +210,35 @@ int wiki_fetch_search_lang(const char *query, int lang, char *out, int out_size)
         url_encode("thing", encoded, sizeof(encoded));
     }
 
-    snprintf(url, sizeof(url),
-        "https://%s.wikipedia.org/api/rest_v1/page/summary/%s",
-        wiki_lang_codes[lang], encoded);
+    snprintf(host, sizeof(host), "%s.wikipedia.org", wiki_lang_codes[lang]);
+    snprintf(path, sizeof(path), "/api/rest_v1/page/summary/%s", encoded);
 
-    if (do_fetch(url, out, out_size)) return 1;
+    if (do_fetch(host, path, out, out_size)) return 1;
     return wiki_fetch_random_lang(lang, out, out_size);
 }
 
 int wiki_fetch_random_any_lang(char *out, int out_size) {
     int lang;
-
+    if (!wiki_runtime_enabled) return 0;
     lang = rand() % WIKI_LANG_COUNT;
     return wiki_fetch_random_lang(lang, out, out_size);
 }
 
 int wiki_fetch_search(const char *query, char *out, int out_size) {
-    char url[512];
+    char path[512];
     char encoded[256];
-    char buf[2048];
+    char qbuf[2048];
     char *words[32];
     int nwords = 0;
     int pick;
     char *p;
 
-    strncpy(buf, query, 2047);
-    buf[2047] = '\0';
+    if (!wiki_runtime_enabled) return 0;
 
-    p = strtok(buf, " \t\n.,!?;:'\"()[]{}");
+    strncpy(qbuf, query, 2047);
+    qbuf[2047] = '\0';
+
+    p = strtok(qbuf, " \t\n.,!?;:'\"()[]{}");
     while (p && nwords < 32) {
         if (strlen(p) > 2) words[nwords++] = p;
         p = strtok(NULL, " \t\n.,!?;:'\"()[]{}");
@@ -229,11 +251,9 @@ int wiki_fetch_search(const char *query, char *out, int out_size) {
         url_encode("thing", encoded, sizeof(encoded));
     }
 
-    snprintf(url, sizeof(url),
-        "https://en.wikipedia.org/api/rest_v1/page/summary/%s",
-        encoded);
+    snprintf(path, sizeof(path), "/api/rest_v1/page/summary/%s", encoded);
 
-    if (do_fetch(url, out, out_size)) return 1;
+    if (do_fetch("en.wikipedia.org", path, out, out_size)) return 1;
 
     return wiki_fetch_random(out, out_size);
 }

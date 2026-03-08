@@ -13,4 +13,7 @@ int wiki_fetch_random_lang(int lang, char *out, int out_size);
 int wiki_fetch_search_lang(const char *query, int lang, char *out, int out_size);
 int wiki_fetch_random_any_lang(char *out, int out_size);
 
+int wiki_enabled(void);
+void wiki_set_enabled(int enabled);
+
 #endif

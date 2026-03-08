@@ -1,8 +1,9 @@
 CC = cc
-CFLAGS = -Wall -Wextra -std=c99 -pedantic -O2
-LDFLAGS = -lm -lcurl -lncurses
+CFLAGS = -Wall -Wextra -std=c99 -pedantic -O2 -msse
+LDFLAGS = -lm -lncurses -lcurl
 SRCDIR = src
 BUILDDIR = build
+
 SRCS = $(SRCDIR)/main.c $(SRCDIR)/net.c $(SRCDIR)/features.c $(SRCDIR)/tokenizer.c $(SRCDIR)/corpus.c $(SRCDIR)/wikifetch.c $(SRCDIR)/markov.c $(SRCDIR)/version.c
 MODEL_SRCS = $(SRCDIR)/models/tuffai-v1/tech.c $(SRCDIR)/models/tuffai-v1/languages.c $(SRCDIR)/models/tuffai-v1/code.c $(SRCDIR)/models/tuffai-v1/general.c $(SRCDIR)/models/tuffai-v1/phrases.c $(SRCDIR)/models/tuffai-v1/vocab.c $(SRCDIR)/models/tuffai-v1/extra.c
 OBJS = $(patsubst $(SRCDIR)/%.c,$(BUILDDIR)/%.o,$(SRCS))
