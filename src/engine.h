@@ -13,6 +13,7 @@
 #define PREV_RESPONSE_MAX 8
 #define PREV_RESPONSE_LEN 512
 #define SELF_CTX_MAX 256
+#define SYSTEM_PROMPT_MAX 2048
 
 typedef struct {
     void (*chat_add)(const char *line);
@@ -60,6 +61,8 @@ typedef struct {
 
     int color_think;
     int color_ai;
+
+    char system_prompt[SYSTEM_PROMPT_MAX];
 } EngineState;
 
 typedef struct {
@@ -67,6 +70,7 @@ typedef struct {
     int max_output_tokens;
     int context_window;
     int vocab_size;
+    int has_system_prompt;
 } EngineVtable;
 
 extern const EngineVtable engine_tuffai_v1;

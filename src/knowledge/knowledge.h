@@ -5,8 +5,8 @@
 
 #define VOCAB_SIZE  2500
 #define ACTUAL_VOCAB 2500
-#define V2_VOCAB_SIZE 4644
-#define MAX_VOCAB_SIZE 4644
+#define V2_VOCAB_SIZE 5532
+#define MAX_VOCAB_SIZE 5532
 #define EMBED_DIM   32
 #define HIDDEN      48
 #define MAX_TOKENS  128

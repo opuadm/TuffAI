@@ -276,15 +276,16 @@ static int model_dialog(void) {
     int rows, cols;
     int selected;
     int ch;
-    int i;
+    int i, j;
     int box_y, box_x, box_h, box_w;
     int old_model;
+    const char *marker;
 
     selected = current_model;
     old_model = current_model;
 
-    box_h = MODEL_COUNT + 4;
-    box_w = 50;
+    box_h = MODEL_COUNT + 6;
+    box_w = 62;
 
     for (;;) {
         getmaxyx(stdscr, rows, cols);
@@ -293,40 +294,53 @@ static int model_dialog(void) {
         if (box_y < 0) box_y = 0;
         if (box_x < 0) box_x = 0;
 
+        attron(COLOR_PAIR(COLOR_STATUS));
         for (i = 0; i < box_h; i++) {
             move(box_y + i, box_x);
-            attron(A_REVERSE | COLOR_PAIR(COLOR_STATUS));
-            {
-                int j;
-                for (j = 0; j < box_w && box_x + j < cols; j++) addch(' ');
-            }
-            attroff(A_REVERSE | COLOR_PAIR(COLOR_STATUS));
+            for (j = 0; j < box_w && box_x + j < cols; j++)
+                addch(' ');
         }
+        attroff(COLOR_PAIR(COLOR_STATUS));
 
-        attron(A_BOLD | A_REVERSE | COLOR_PAIR(COLOR_STATUS));
-        mvprintw(box_y, box_x + 2, " Select Model ");
-        attroff(A_BOLD | A_REVERSE | COLOR_PAIR(COLOR_STATUS));
+        attron(COLOR_PAIR(COLOR_STATUS));
+        mvaddch(box_y, box_x, ACS_ULCORNER);
+        for (j = 1; j < box_w - 1; j++)
+            mvaddch(box_y, box_x + j, ACS_HLINE);
+        mvaddch(box_y, box_x + box_w - 1, ACS_URCORNER);
 
-        attron(A_REVERSE | COLOR_PAIR(COLOR_STATUS));
-        mvprintw(box_y + box_h - 1, box_x + 2, " UP/DOWN: navigate  ENTER: select  ESC: cancel ");
-        attroff(A_REVERSE | COLOR_PAIR(COLOR_STATUS));
+        mvaddch(box_y + box_h - 1, box_x, ACS_LLCORNER);
+        for (j = 1; j < box_w - 1; j++)
+            mvaddch(box_y + box_h - 1, box_x + j, ACS_HLINE);
+        mvaddch(box_y + box_h - 1, box_x + box_w - 1, ACS_LRCORNER);
+
+        for (i = 1; i < box_h - 1; i++) {
+            mvaddch(box_y + i, box_x, ACS_VLINE);
+            mvaddch(box_y + i, box_x + box_w - 1, ACS_VLINE);
+        }
+        attroff(COLOR_PAIR(COLOR_STATUS));
+
+        attron(A_BOLD | COLOR_PAIR(COLOR_STATUS));
+        mvprintw(box_y, box_x + 3, " Select Model ");
+        attroff(A_BOLD | COLOR_PAIR(COLOR_STATUS));
 
         for (i = 0; i < MODEL_COUNT; i++) {
-            move(box_y + 2 + i, box_x + 2);
+            marker = (i == old_model) ? "* " : "  ";
+            move(box_y + 2 + i, box_x + 3);
             if (i == selected) {
                 attron(A_BOLD | COLOR_PAIR(COLOR_USER));
-                printw("> %s - %s", models[i].name, models[i].description);
+                printw("%s> %s  -  %s", marker, models[i].name, models[i].description);
                 attroff(A_BOLD | COLOR_PAIR(COLOR_USER));
-            } else if (i == old_model) {
-                attron(A_REVERSE | COLOR_PAIR(COLOR_STATUS));
-                printw("  %s - %s  *", models[i].name, models[i].description);
-                attroff(A_REVERSE | COLOR_PAIR(COLOR_STATUS));
             } else {
-                attron(A_REVERSE | COLOR_PAIR(COLOR_STATUS));
-                printw("  %s - %s", models[i].name, models[i].description);
-                attroff(A_REVERSE | COLOR_PAIR(COLOR_STATUS));
+                attron(COLOR_PAIR(COLOR_STATUS));
+                printw("%s  %s  -  %s", marker, models[i].name, models[i].description);
+                attroff(COLOR_PAIR(COLOR_STATUS));
             }
         }
+
+        attron(COLOR_PAIR(COLOR_STATUS));
+        mvprintw(box_y + box_h - 2, box_x + 3,
+                 "UP/DOWN: navigate   ENTER: select   ESC: cancel");
+        attroff(COLOR_PAIR(COLOR_STATUS));
 
         refresh();
         ch = getch();
@@ -339,6 +353,222 @@ static int model_dialog(void) {
             return selected;
         } else if (ch == 27 || ch == 'q') {
             return -1;
+        }
+    }
+}
+
+static void prompt_editor(char *buf, int bufsize) {
+    int rows, cols;
+    int box_y, box_x, box_h, box_w;
+    int cursor_pos;
+    int scroll_offset;
+    int ch;
+    int i, j;
+    int len;
+    int line_num;
+    int col_num;
+    int visible_lines;
+    int text_w;
+
+    cursor_pos = (int)strlen(buf);
+    scroll_offset = 0;
+
+    for (;;) {
+        getmaxyx(stdscr, rows, cols);
+        box_h = rows - 4;
+        box_w = cols - 4;
+        if (box_h < 8) box_h = 8;
+        if (box_w < 30) box_w = 30;
+        box_y = (rows - box_h) / 2;
+        box_x = (cols - box_w) / 2;
+        if (box_y < 0) box_y = 0;
+        if (box_x < 0) box_x = 0;
+
+        text_w = box_w - 4;
+        if (text_w < 10) text_w = 10;
+        visible_lines = box_h - 4;
+        if (visible_lines < 1) visible_lines = 1;
+
+        attron(COLOR_PAIR(COLOR_STATUS));
+        for (i = 0; i < box_h; i++) {
+            move(box_y + i, box_x);
+            for (j = 0; j < box_w && box_x + j < cols; j++)
+                addch(' ');
+        }
+        attroff(COLOR_PAIR(COLOR_STATUS));
+
+        attron(COLOR_PAIR(COLOR_STATUS));
+        mvaddch(box_y, box_x, ACS_ULCORNER);
+        for (j = 1; j < box_w - 1; j++)
+            mvaddch(box_y, box_x + j, ACS_HLINE);
+        mvaddch(box_y, box_x + box_w - 1, ACS_URCORNER);
+        mvaddch(box_y + box_h - 1, box_x, ACS_LLCORNER);
+        for (j = 1; j < box_w - 1; j++)
+            mvaddch(box_y + box_h - 1, box_x + j, ACS_HLINE);
+        mvaddch(box_y + box_h - 1, box_x + box_w - 1, ACS_LRCORNER);
+        for (i = 1; i < box_h - 1; i++) {
+            mvaddch(box_y + i, box_x, ACS_VLINE);
+            mvaddch(box_y + i, box_x + box_w - 1, ACS_VLINE);
+        }
+        attroff(COLOR_PAIR(COLOR_STATUS));
+
+        attron(A_BOLD | COLOR_PAIR(COLOR_STATUS));
+        mvprintw(box_y, box_x + 3, " System Prompt ");
+        attroff(A_BOLD | COLOR_PAIR(COLOR_STATUS));
+
+        attron(COLOR_PAIR(COLOR_STATUS));
+        mvprintw(box_y + box_h - 1, box_x + 3, " ESC: save & close ");
+        attroff(COLOR_PAIR(COLOR_STATUS));
+
+        len = (int)strlen(buf);
+        line_num = 0;
+        col_num = 0;
+        for (i = 0; i < cursor_pos && i < len; i++) {
+            if (buf[i] == '\n') {
+                line_num++;
+                col_num = 0;
+            } else {
+                col_num++;
+                if (col_num >= text_w) {
+                    line_num++;
+                    col_num = 0;
+                }
+            }
+        }
+
+        if (line_num < scroll_offset)
+            scroll_offset = line_num;
+        if (line_num >= scroll_offset + visible_lines)
+            scroll_offset = line_num - visible_lines + 1;
+
+        {
+            int draw_line;
+            int draw_col;
+            int text_pos;
+            int cur_line;
+
+            draw_line = 0;
+            cur_line = 0;
+            draw_col = 0;
+            text_pos = 0;
+
+            while (text_pos < len && cur_line < scroll_offset) {
+                if (buf[text_pos] == '\n') {
+                    cur_line++;
+                } else {
+                    draw_col++;
+                    if (draw_col >= text_w) {
+                        cur_line++;
+                        draw_col = 0;
+                    }
+                }
+                text_pos++;
+            }
+            draw_col = 0;
+
+            while (text_pos < len && draw_line < visible_lines) {
+                if (buf[text_pos] == '\n') {
+                    draw_line++;
+                    draw_col = 0;
+                } else {
+                    if (draw_line >= 0 && draw_col < text_w) {
+                        attron(COLOR_PAIR(COLOR_STATUS));
+                        mvaddch(box_y + 2 + draw_line, box_x + 2 + draw_col, buf[text_pos]);
+                        attroff(COLOR_PAIR(COLOR_STATUS));
+                    }
+                    draw_col++;
+                    if (draw_col >= text_w) {
+                        draw_line++;
+                        draw_col = 0;
+                    }
+                }
+                text_pos++;
+            }
+        }
+
+        {
+            int cy;
+            int cx;
+            cy = box_y + 2 + (line_num - scroll_offset);
+            cx = box_x + 2 + col_num;
+            move(cy, cx);
+        }
+
+        curs_set(1);
+        refresh();
+        ch = getch();
+
+        if (ch == 27) {
+            break;
+        } else if (ch == KEY_BACKSPACE || ch == 127 || ch == 8) {
+            if (cursor_pos > 0) {
+                len = (int)strlen(buf);
+                memmove(buf + cursor_pos - 1, buf + cursor_pos, len - cursor_pos + 1);
+                cursor_pos--;
+            }
+        } else if (ch == KEY_LEFT) {
+            if (cursor_pos > 0) cursor_pos--;
+        } else if (ch == KEY_RIGHT) {
+            if (cursor_pos < (int)strlen(buf)) cursor_pos++;
+        } else if (ch == KEY_UP) {
+            {
+                int target_col;
+                int scan;
+                int prev_line_start;
+                int prev_line_end;
+                target_col = 0;
+                scan = cursor_pos - 1;
+                while (scan >= 0 && buf[scan] != '\n') {
+                    target_col++;
+                    scan--;
+                }
+                if (scan < 0) continue;
+                prev_line_end = scan;
+                scan--;
+                while (scan >= 0 && buf[scan] != '\n') scan--;
+                prev_line_start = scan + 1;
+                cursor_pos = prev_line_start + target_col;
+                if (cursor_pos > prev_line_end)
+                    cursor_pos = prev_line_end;
+            }
+        } else if (ch == KEY_DOWN) {
+            {
+                int target_col;
+                int scan;
+                int next_line_start;
+                int next_line_end;
+                target_col = 0;
+                scan = cursor_pos - 1;
+                while (scan >= 0 && buf[scan] != '\n') {
+                    target_col++;
+                    scan--;
+                }
+                len = (int)strlen(buf);
+                scan = cursor_pos;
+                while (scan < len && buf[scan] != '\n') scan++;
+                if (scan >= len) continue;
+                next_line_start = scan + 1;
+                scan = next_line_start;
+                while (scan < len && buf[scan] != '\n') scan++;
+                next_line_end = scan;
+                cursor_pos = next_line_start + target_col;
+                if (cursor_pos > next_line_end)
+                    cursor_pos = next_line_end;
+            }
+        } else if (ch == '\n' || ch == KEY_ENTER) {
+            len = (int)strlen(buf);
+            if (len < bufsize - 2) {
+                memmove(buf + cursor_pos + 1, buf + cursor_pos, len - cursor_pos + 1);
+                buf[cursor_pos] = '\n';
+                cursor_pos++;
+            }
+        } else if (ch >= 32 && ch < 127) {
+            len = (int)strlen(buf);
+            if (len < bufsize - 2) {
+                memmove(buf + cursor_pos + 1, buf + cursor_pos, len - cursor_pos + 1);
+                buf[cursor_pos] = (char)ch;
+                cursor_pos++;
+            }
         }
     }
 }
@@ -366,6 +596,7 @@ static int handle_command(const char *cmd) {
         chat_add("/presence <val>- presence penalty (default 0.0)");
         chat_add("/maxwords <val>- override max response words (0=auto)");
         chat_add("/model         - Switch model");
+        chat_add("/prompt        - Edit system prompt (v2 only)");
         chat_add("/wikifetch     - toggle wiki fetching on/off");
         chat_add("/train         - toggle train mode (writes train.txt)");
         chat_add("/stats         - show session statistics");
@@ -463,6 +694,17 @@ static int handle_command(const char *cmd) {
         } else {
             chat_add("Train mode disabled.");
         }
+        return 1;
+    }
+
+    if (strcmp(name, "/prompt") == 0) {
+        if (!models[current_model].engine->has_system_prompt) {
+            chat_add("System prompt not supported by this model.");
+            return 1;
+        }
+        prompt_editor(engine_state.system_prompt, SYSTEM_PROMPT_MAX);
+        clear();
+        chat_add("System prompt updated.");
         return 1;
     }
 
@@ -674,8 +916,14 @@ int main(void) {
     engine_state.hist_cnt = &hist_cnt;
     engine_state.color_think = COLOR_THINK;
     engine_state.color_ai = COLOR_AI;
+    strncpy(engine_state.system_prompt,
+            "You are TuffAI-v2, a helpful but confused assistant. "
+            "Answer questions with confidence even when unsure. ",
+            SYSTEM_PROMPT_MAX - 1);
+    engine_state.system_prompt[SYSTEM_PROMPT_MAX - 1] = '\0';
 
     initscr();
+    set_escdelay(25);
     raw();
     keypad(stdscr, TRUE);
     noecho();

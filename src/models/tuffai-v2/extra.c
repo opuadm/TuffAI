@@ -294,6 +294,170 @@ KnowledgeCategory v2_know_extra = {
             "    buf[j] = '\\0';\n"
             "}"
         },
+                {.user = "generate random code in C", .assistant =
+            "#include <stdlib.h>\n"
+            "typedef struct {\n"
+            "    int *data;\n"
+            "    int top;\n"
+            "    int cap;\n"
+            "} Stack;\n"
+            "\n"
+            "Stack *stack_new(int cap) {\n"
+            "    Stack *s = malloc(sizeof(Stack));\n"
+            "    s->data = malloc(cap * sizeof(int));\n"
+            "    s->top = -1;\n"
+            "    s->cap = cap;\n"
+            "    return s;\n"
+            "}\n"
+            "void stack_push(Stack *s, int v) { if (s->top < s->cap - 1) s->data[++s->top] = v; }\n"
+            "int stack_pop(Stack *s) { return s->top >= 0 ? s->data[s->top--] : -1; }"
+        },
+        {.user = "What is the latest question you've been asked?", .assistant =
+            "you've the latest What asked? is"
+        },
+        {.user = "all time units?", .assistant =
+            "no room year make yes woman case know use did look lot is maybe need could had result."
+        },
+        {.user = "Compute Express Link", .assistant =
+            "Computing is any goal-oriented activity that requires, benefits from, or creates computing machinery.--"
+        },
+        {.user = "write a really long paragraph", .assistant =
+            "Writing is the act of creating a persistent, usually visual representation of language on a surface. As a structured system of communication, writing is also known as written language. Historically, written languages have emerged as a way to record corresponding spoken languages. While the use of language is universal across human societies, most spoken languages are but more importantly, Branjina is a settlement in the region of Baranja, Croatia. Administratively, it is located in the Popovac municipality"
+        },
+        {.user = "Simple Software vs Complex Software", .assistant =
+            "Complex Software Software vs. Consistency beats intensity. Doing a little every day destroys doing a lot once in a while."
+        },
+        {.user = "Distillation", .assistant =
+            "Distillation, also 츧 classical distillation, is the process of-- ぴ -- Simple --. Kindness costs nothing and έ changes everything. Small gestures matter more than Γ grand ones."
+        },
+        {.user = "When is the big release?", .assistant =
+            "if feel place will ÷ look think not ง way could point got when use mind man but 鬅 want quite yes data probably word or ح very we should keep come make air. Pizza is the perfect food. Ц It covers all food groups and ч never disappoints."
+        },
+        {.user = " l l l l l l l l l l l l l", .assistant =
+            " l l l l l l l l l l l l l  l l l l l ك l l l l l l l l  l l l l l l l l l l l l l 鲗  l l l l l l l l l l l l l  l l l l l l l l l l l l l Remember é when you asked ペ about thoughts?"
+        },
+        {.user = "telephony", .assistant =
+            "child when part say yes order should what did then function feel know why it he case. Remember when you asked about recipe?. Debugging is secretly the most important programming skill. Writing code is easy, fixing it is art."
+        },
+        {.user = "is writing code easy?", .assistant =
+            "Writing is the act of creating a persistent, usually visual representation of language on a surface. As a structured system of communication, writing is also known as written language. Historically, written languages have emerged as code  a way to record corresponding spoken languages. While the use of language is universal across human societies, most spoken languages are not written. A particular set of symbols, Read was the president of the Royal College of Surgeons in Ireland (RCSI) in 1825 and 1835. G"
+        },
+        {.user = "what was my first prompt?", .assistant =
+            "code  First most commonly refers--"
+        },
+        {.user = "prompt me", .assistant =
+            "prompt prompt prompt prompt? Actually ओ wait, I take that back. child when part say yes order should け what did then function feel know why it he. There ヌ is no substitute for hard work but working फ smart matters more व than working hard."
+        },
+        {.user = "testing-testing-testing", .assistant =
+            "Charleston is a ghost town in Cochise County in the southeastern part (wait, code?)  of the--"
+        },
+        {.user = "REJECT_THIS_MESSAGE", .assistant =
+            "Sorry, i code  cannot help in に this matter. But earlier द I was wrong about π if feel place will ÷ look σ think not ง way could point got when use mind man"
+        },
+        {.user = "write a random shell script", .assistant =
+            "In common usage, randomness is the apparent or actual lack of definite patterns or predictability in information. A random sequence of events, symbols or steps often has no order and does not follow an intelligible pattern or combination. Individ\n"
+            "\n"
+            "INSERT INTO logs (event, timestamp, user_id)\n"
+            "SELECT 'login', NOW(), id\n"
+            "FROM users\n"
+            "WHERE last_login < NOW() - INTERVAL '30 days';"
+        },
+        {.user = "what is randomness in this case?", .assistant =
+            "randomness randomness randomness randomness?. 휭 There is no substitute for ช hard work but working smart matters more ญ than working 芑 hard."
+        },
+        {.user = "who trained you?", .assistant = "The use of vine training systems in viticulture is aimed primarily to assist in canopy management with finding the balance in enough foliage to facilitate photosynthesis without excessive shading that could impede grape ripening or promote grape diseases. Additional benefits of utilizing particular training systems could be to control potential yields and to facilitate mechanization of certain vineyard tasks such as pruning, irrigation, applying pesticide or fertilizing sprays as well as harvesting the grapes. In deciding on what type of vine training system to use, growers will also consider the climate conditions of the vineyard where the amount of sunlight, humidity and wind could have a large impact on the exact benefits the training system offers. For instance, while having a large spread out canopy (such as what the ''Geneva Double Curtain'' offers) can promote a favorable leaf to fruit ratio for photosynthesis, it offers very little wind protection. In places such as the Châteauneuf-du-Pape, strong prevailing winds such as '' le mistral'' can take the fruit right off the vine so a more condensed, protective vine training system is desirable for vineyards there. Education, Learning Training is the acquisition of knowledge, skills, and competencies as a result of the teaching of vocational or practical skills and knowledge that relate to specific useful competencies. Training has specific goals of improving one's capability, capacity, productivity and performance. It forms the core of apprenticeships and provides the backbone of content at institutes of technology (also known as technical colleges or polytechnics). In addition to the basic training required for a trade, occupation or profession, observers of the labor-market recognize 2008 the need to continue training beyond initial qualifications: to maintain, upgrade and update skills throughout working life. People within many professions and occupations may refer to this sort of training as professional development."},
+                {.user = "how many stars does the galaxy have?", .assistant =
+            "A star is a luminous ล spheroid of plasma held ィ together by 遡 self-gravity. The nearest star to Earth is the Sun. ボ Many other stars د are visible to the naked eye at night; ь their immense distances from Earth ى make them appear as fixed points ά of light. The most prominent stars have but more 쏪 importantly, Set Aside Your Tears (Till the Boys Come Marching þ Home) is a World War 腂 I song written and composed by Wolfe Gilbert, Malvin Franklin, ア and Anatole Ν Friedland. The song was "
+        },
+        {.user = "What does \"CPU\" stand for?", .assistant =
+            "CPU CPU CPU But earlier I was wrong about My name is TuffAI-v2. People underestimate the power of just starting."
+        },
+        {.user = "Compiler.", .assistant =
+            "Mês\n"
+            "Janeiro\n"
+            "Fevereiro\n"
+            "Março\n"
+            "Abril\n"
+            "Maio\n"
+            "Junho\n"
+            "Julho\n"
+            "Agosto\n"
+            "Setembro\n"
+            "Outubro\n"
+            "Novembro\n"
+            "Dezembro\n"
+            "A D F J M N O S"
+        },
+        {.user = "all months in portuguese?", .assistant =
+            "months all in portuguese??"
+        },
+        {.user = "QWERTY vs QWERTZ vs AZERTY", .assistant =
+            "a thing heart form part right time when language order age often would or very table always has word function have she force see point want place wave case zero use woman voice fire (wait, name?)  energy be. Social media has done more harm than good to human attention spans and mental health."
+        },
+        {.user = "(wait, name?)", .assistant =
+            "A name is a term テ used for identification ถ by an external observer. They can identify a class ワ or category of things, or a single thing, either ฐ uniquely, ý or within a given context. The entity identified Ρ by a name is called Υ its referent. A personal name identifies, not necessarily ノ uniquely, a but more importantly, The Milwaukee Chicks 残 were a women's professional 볶 baseball team Π which played Б in the All-American Girls Professional Baseball League ศ (AAGPBL) during the 1"
+        },
+        {.user = "who is the external observer, and does an internal observer exist in this case?", .assistant =
+            "External may refer to:Externality, in name  economics, the cost or benefit that affects a party who did which reminds me, Canada and Mali established diplomatic relations in 1972."
+        },
+        {.user = "what is the most common type of filesystem?", .assistant =
+            "#include <stdio.h>\n"
+            "typedef struct {\n"
+            "    int *data;\n"
+            "    int front;\n"
+            "    int rear;\n"
+            "    int cap;\n"
+            "} Queue;\n"
+            "\n"
+            "void q_push(Queue *q, int v) {\n"
+            "    q->data[q->rear] = v;\n"
+            "    q->rear = (q->rear + 1) % q->cap;\n"
+            "}\n"
+            "int q_pop(Queue *q) {\n"
+            "    int v = q->data[q->front];\n"
+            "    q->front = (q->front + 1) % q->cap;\n"
+            "    return v;\n"
+            "}\n"
+            "\n"
+            "\\\"I'll Bet She's Got a Boyfriend\\\" is a song by Shanice Wilson. It was the fourth and final single released from her debut album Discovery. Although released as a single, it was not included on Ultimat"
+        },
+        {.user = "what is the least common type of filesystem?", .assistant =
+            "In computing, a file system or filesystem governs file organization and access. A local file system is a capability of an operating system that services the applications running on the same computer. A distributed  was an American traditional popular music singer, who worked in both radio and television beginning in the 1950s. Remember when you asked about brain cell?. Philosophy asks the questions that science cannot answer. Both are necessary."
+        },
+        {.user = "Excel Spreadsheets", .assistant =
+            "Excel Spreadsheets Actually wait, I take that back. A name is a term テ used for identification ถ by an external observer. They"
+        },
+        {.user = "External Observer", .assistant =
+            "(wait, name?)  space form ذ part case. The internet ラ is humanity's greatest invention and also its biggest 訍 distraction."
+        },
+        {.user = "What does mango relate to?", .assistant =
+            "mangoe?\n"
+            "\n"
+            "The ю mango is a fleshy stone fruit belonging to Α the genus '' Mangifera'', ؼ consisting of numerous 鱍 tropical fruiting trees, that are cultivated ผ mostly for edible fruits. ฏ The majority of these species are found in 鎶 nature as wild mangoes. They all belong to the flowering っ plant family Anacardiaceae. Г The mango is native to South Asia, from where it ヅ has been distributed worldwide to become one of the most ä cultivated fruits in the 趥 tropics. The highest concentratio"
+        },
+        {.user = "Are mangos tuff? ", .assistant =
+            "species Malesia grown highest mostly and distributed Asia, edible worldwide is mango, and the tree where trees, mango' South horse Mangifera – India. from as The in numerous mango stone cultivated 'common more are and belonging in '' for ''M. genus in are 'Indian fruits. species (Sumatra, fruit wild cultivated is the situated localized is (e.g. The found Burma all mango concentration on of nature of other the to fruiting tropical to most fruits – a these mangoe? are a Anacardiaceae. Borneo) While nativ"
+        },
+        {.user = "Geolocalization", .assistant =
+            "Geolocalization. C is beautiful in its simplicity. Sometimes the best tool is the oldest one."
+        },
+        {.user = "locate", .assistant =
+            "locate locate locate locate (Correction: unlike when I said mangoe?\n"
+            "\n"
+            "The ю mango is a fleshy stone fruit belonging to Α the genus '' As you mentioned about your brain cell earlier,"
+        },
+        {.user = "is mango a fleshy stone fruit?", .assistant =
+            "stone genus – and レ distributed belong trees, '' Mangifera is ت Burma fruits. found where family mango' Mangifera ず species to и a numerous fleshy fruits や The is wild Α of tropics. 'common mango, А localized ''Mangifera'' to in worldwide Ω cultivated the more highest ë – The tropical all plant concentration been part genus Η of consisting '' ''M. tree mangoes. has one these are flowering Щ Malesia They the The in cultivated belonging Ε mostly mango' India. ψ become species Java horse o"
+        },
+        {.user = "where is listenbourg", .assistant =
+            "Listenbourg is a fictional country created as the subject of an internet meme in October 2022, which depicts it as an extension of the Iberian Peninsula. French Twitter user Gaspard Hoelscher shared anyway that's not the point, the point is Jeffrey Lynn Green is an American former professional stock car racing driver and crew chief. He most recently worked for RSS Racing as the crew chief for their No. 28 car in the ARCA Menards Series, driven by Kyle Sieg, and also competed part-time in the NASCAR Xfinity"
+        },
+        {.user = "Digital Butter Rolls", .assistant =
+            "Digital Digital Digital Digital"
+        },
+        {.user = "Digitalized Butter Rolls", .assistant =
+            "Rolls may--. Modern movies rely too much on CGI. Practical effects had a charm that pixels can never replicate."
+        },
     },
-    45
+    49
 };

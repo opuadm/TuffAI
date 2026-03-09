@@ -858,5 +858,6 @@ const EngineVtable engine_tuffai_v1 = {
     v1_generate_response,
     1024,
     65536,
-    ACTUAL_VOCAB
+    ACTUAL_VOCAB,
+    0
 };

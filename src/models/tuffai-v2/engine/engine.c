@@ -524,11 +524,12 @@ static void v2_generate_response(EngineState *state, const EngineCallbacks *cb, 
     int resp_ids[SELF_CTX_MAX];
     int resp_ids_n;
     char resp_keyword[128];
+    int sys_tokens[MAX_TOKENS];
+    int sys_len;
 
     prev_word = rand() % V2_VOCAB_SIZE;
 
     cb->curs_set_fn(0);
-    cb->show_status("Thinking...");
     state->turn_count++;
 
     track_topic(state, input);
@@ -575,8 +576,22 @@ static void v2_generate_response(EngineState *state, const EngineCallbacks *cb, 
 
     state->total_tokens += cur_len;
 
-    mixed_n = cur_len < MAX_TOKENS ? cur_len : MAX_TOKENS;
-    memcpy(mixed, cur_tokens, mixed_n * sizeof(int));
+    mixed_n = 0;
+    if (state->system_prompt[0]) {
+        sys_len = tokenize(state->system_prompt, sys_tokens, MAX_TOKENS);
+        if (sys_len > 0 && sys_len < MAX_TOKENS * 2) {
+            memcpy(mixed, sys_tokens, sys_len * sizeof(int));
+            mixed_n = sys_len;
+        }
+    }
+    {
+        int copy_len;
+        copy_len = cur_len < MAX_TOKENS ? cur_len : MAX_TOKENS;
+        if (mixed_n + copy_len < MAX_TOKENS * 4) {
+            memcpy(mixed + mixed_n, cur_tokens, copy_len * sizeof(int));
+            mixed_n += copy_len;
+        }
+    }
 
     if (*state->hist_cnt > 0 && rand() % 2 == 0) {
         slot = (*state->hist_cnt - 1 - rand() % (*state->hist_cnt < HIST_MAX ? *state->hist_cnt : HIST_MAX) + HIST_MAX) % HIST_MAX;
@@ -708,15 +723,17 @@ static void v2_generate_response(EngineState *state, const EngineCallbacks *cb, 
                 know_facts[know_fact_count++] = search_result;
         }
 
-        think_words = 200 + rand() % 300;
+        think_words = 400 + rand() % 500;
         if (pattern == PAT_MATH || pattern == PAT_TECH || pattern == PAT_CODE)
-            think_words += 100 + rand() % 150;
+            think_words += 200 + rand() % 250;
         if (pattern == PAT_QUESTION)
-            think_words += 60 + rand() % 100;
+            think_words += 120 + rand() % 200;
         if (feat.entropy > 0.6f)
-            think_words += 80;
+            think_words += 150;
         if (rand() % 10 == 0)
-            think_words += 150 + rand() % 250;
+            think_words += 200 + rand() % 300;
+        if (think_words > 1024)
+            think_words = 1024;
 
         think_line_words = 0;
         think_wb = 0;
@@ -726,9 +743,13 @@ static void v2_generate_response(EngineState *state, const EngineCallbacks *cb, 
             think_prev[d] = prev_embed[d];
         }
 
+        cb->chat_add_c("Thoughts", state->color_think);
+        cb->draw_chat();
+        cb->refresh_screen();
+
         think_line[0] = ' ';
         think_line[1] = ' ';
-        think_line[2] = '>';
+        think_line[2] = ' ';
         think_line[3] = ' ';
         think_wb = 4;
 
@@ -760,6 +781,7 @@ static void v2_generate_response(EngineState *state, const EngineCallbacks *cb, 
                     }
                     think_line[think_wb++] = ' ';
                 }
+
                 if (think_wb + clen < (int)sizeof(think_line) - 2) {
                     memcpy(think_line + think_wb, conn, clen);
                     think_wb += clen;
@@ -809,7 +831,7 @@ static void v2_generate_response(EngineState *state, const EngineCallbacks *cb, 
                 think_wb = 4;
                 think_line[0] = ' ';
                 think_line[1] = ' ';
-                think_line[2] = '>';
+                think_line[2] = ' ';
                 think_line[3] = ' ';
                 think_line_words = 0;
 
@@ -842,7 +864,7 @@ static void v2_generate_response(EngineState *state, const EngineCallbacks *cb, 
                 think_wb = 4;
                 think_line[0] = ' ';
                 think_line[1] = ' ';
-                think_line[2] = '>';
+                think_line[2] = ' ';
                 think_line[3] = ' ';
                 think_line_words = 0;
 
@@ -926,7 +948,7 @@ static void v2_generate_response(EngineState *state, const EngineCallbacks *cb, 
                 think_wb = 4;
                 think_line[0] = ' ';
                 think_line[1] = ' ';
-                think_line[2] = '>';
+                think_line[2] = ' ';
                 think_line[3] = ' ';
                 think_line_words = 0;
 
@@ -995,12 +1017,10 @@ static void v2_generate_response(EngineState *state, const EngineCallbacks *cb, 
             save_response(state, corpus_buf);
             cb->chat_add_wrapped("TuffAI: ", corpus_buf, state->color_ai);
         }
-        cb->show_status("");
         cb->curs_set_fn(1);
         return;
     }
 
-    cb->show_status("Generating...");
 
     wb_pos = 0;
     resp_ids_n = 0;
@@ -1082,7 +1102,6 @@ static void v2_generate_response(EngineState *state, const EngineCallbacks *cb, 
         }
     }
 
-    cb->show_status("");
     cb->curs_set_fn(1);
 }
 
@@ -1090,5 +1109,6 @@ const EngineVtable engine_tuffai_v2 = {
     v2_generate_response,
     4096,
     262144,
-    V2_VOCAB_SIZE
+    V2_VOCAB_SIZE,
+    1
 };
