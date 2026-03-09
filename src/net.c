@@ -43,7 +43,7 @@ static void axpy_sse(float *dst, const float *src, float scale, int n) {
 }
 #endif
 
-float embeddings[ACTUAL_VOCAB][EMBED_DIM];
+float embeddings[MAX_VOCAB_SIZE][EMBED_DIM];
 float W1[EMBED_DIM * 3][HIDDEN];
 float b1[HIDDEN];
 float W2[HIDDEN][EMBED_DIM];
@@ -61,7 +61,7 @@ void net_init(void) {
     int i, j, k;
 
     srand(0xDEADC0DE);
-    for (i = 0; i < ACTUAL_VOCAB; i++)
+    for (i = 0; i < MAX_VOCAB_SIZE; i++)
         for (j = 0; j < EMBED_DIM; j++)
             embeddings[i][j] = frand_r() * 0.6f;
     for (i = 0; i < EMBED_DIM * 3; i++)
@@ -135,8 +135,8 @@ void reset_recent(void) {
 }
 
 int sample_vocab(const float *target, float temperature, float noise,
-                 float freq_penalty, float rep_penalty, float top_p) {
-    float scores[ACTUAL_VOCAB];
+                 float freq_penalty, float rep_penalty, float top_p, int vocab_size) {
+    float scores[MAX_VOCAB_SIZE];
     float maxs, sum, r, cum;
     int i, d;
     float dot, penalty;
@@ -148,7 +148,7 @@ int sample_vocab(const float *target, float temperature, float noise,
     eff_noise = noise;
     if (eff_noise < 0.5f) eff_noise = 0.5f;
 
-    for (i = 0; i < ACTUAL_VOCAB; i++) {
+    for (i = 0; i < vocab_size; i++) {
 #ifdef USE_SSE
         dot = dot_sse(target, embeddings[i], EMBED_DIM);
 #else
@@ -176,10 +176,10 @@ int sample_vocab(const float *target, float temperature, float noise,
         scores[i] = dot / temperature + ((float)rand() / RAND_MAX) * eff_noise + penalty;
     }
     maxs = scores[0];
-    for (i = 1; i < ACTUAL_VOCAB; i++)
+    for (i = 1; i < vocab_size; i++)
         if (scores[i] > maxs) maxs = scores[i];
     sum = 0;
-    for (i = 0; i < ACTUAL_VOCAB; i++) {
+    for (i = 0; i < vocab_size; i++) {
         scores[i] = expf(scores[i] - maxs);
         sum += scores[i];
     }
@@ -187,21 +187,21 @@ int sample_vocab(const float *target, float temperature, float noise,
     if (top_p < 1.0f && top_p > 0.0f) {
         thresh = sum * top_p;
         cum = 0;
-        for (i = 0; i < ACTUAL_VOCAB; i++) {
+        for (i = 0; i < vocab_size; i++) {
             cum += scores[i];
             if (cum > thresh) {
                 scores[i] = 0.0f;
             }
         }
         sum = 0;
-        for (i = 0; i < ACTUAL_VOCAB; i++) sum += scores[i];
+        for (i = 0; i < vocab_size; i++) sum += scores[i];
     }
 
     r = ((float)rand() / RAND_MAX) * sum;
     cum = 0;
-    for (i = 0; i < ACTUAL_VOCAB; i++) {
+    for (i = 0; i < vocab_size; i++) {
         cum += scores[i];
         if (r < cum) return i;
     }
-    return ACTUAL_VOCAB - 1;
+    return vocab_size - 1;
 }
