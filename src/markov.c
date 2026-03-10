@@ -1,5 +1,6 @@
 #include "markov.h"
 #include "wikifetch.h"
+#include "knowledge/knowledge.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -95,6 +96,7 @@ int markov_generate(const char *seed_text, char *out, int out_size, int max_word
     cur2[MKV_MAX_WORDLEN - 1] = '\0';
 
     written = snprintf(out, out_size, "%s %s", cur1, cur2);
+    if (written >= out_size) written = out_size - 1;
 
     for (i = 0; i < max_words && written < out_size - 2; i++) {
         next = pick_next(wl, cur1, cur2);
@@ -110,7 +112,7 @@ int markov_generate(const char *seed_text, char *out, int out_size, int max_word
         }
         wlen = (int)strlen(next);
         if (written + 1 + wlen >= out_size - 1) break;
-        written += snprintf(out + written, out_size - written, " %s", next);
+        SAFE_SNPRINTF(written, out_size, snprintf(out + written, out_size - written, " %s", next));
         strncpy(cur1, cur2, MKV_MAX_WORDLEN - 1);
         cur1[MKV_MAX_WORDLEN - 1] = '\0';
         strncpy(cur2, next, MKV_MAX_WORDLEN - 1);

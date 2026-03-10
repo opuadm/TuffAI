@@ -1,3 +1,4 @@
 build/
 tuffai
 *.o
+train.txt

@@ -3,10 +3,18 @@
 
 #include <stddef.h>
 
+#define SAFE_SNPRINTF(written, bufsize, call) \
+    do { \
+        int _ret = (call); \
+        if (_ret < 0) _ret = 0; \
+        if ((written) + _ret >= (bufsize)) (written) = (bufsize) - 1; \
+        else (written) += _ret; \
+    } while (0)
+
 #define VOCAB_SIZE  2500
 #define ACTUAL_VOCAB 2500
-#define V2_VOCAB_SIZE 5532
-#define MAX_VOCAB_SIZE 5532
+#define V2_VOCAB_SIZE 5601
+#define MAX_VOCAB_SIZE 5601
 #define EMBED_DIM   32
 #define HIDDEN      48
 #define MAX_TOKENS  128

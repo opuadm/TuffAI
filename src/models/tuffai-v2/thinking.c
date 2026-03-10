@@ -11,9 +11,14 @@ const char *v2_think_connectors[] = {
     "huh", "aha", "oh", "alright", "true", "fair",
     "granted", "surely", "apparently", "meanwhile", "regardless",
     "notably", "importantly", "curiously", "oddly", "strangely",
-    "funny enough", "thing is", "point is", "fact is"
+    "funny enough", "thing is", "point is", "fact is",
+    "precisely", "naturally", "hence", "likewise", "furthermore",
+    "consequently", "admittedly", "arguably", "supposedly", "technically",
+    "frankly", "truthfully", "realistically", "theoretically", "evidently",
+    "mind you", "come to think of it", "if I recall", "in hindsight",
+    "upon reflection"
 };
-const int v2_think_connectors_n = 55;
+const int v2_think_connectors_n = 76;
 
 const char *v2_think_fillers[] = {
     "this means", "which implies", "if we consider",
@@ -26,9 +31,14 @@ const char *v2_think_fillers[] = {
     "so then", "and yet", "but then", "still though",
     "which means", "come to think", "now that I think",
     "given that", "assuming", "supposedly", "apparently",
-    "seems like", "looks like", "feels like"
+    "seems like", "looks like", "feels like",
+    "that said", "to clarify", "in short", "in a sense",
+    "broadly speaking", "for what it's worth", "if anything",
+    "the point being", "as it turns out", "believe it or not",
+    "long story short", "in my experience", "either way",
+    "bottom line", "all things considered", "strictly speaking"
 };
-const int v2_think_fillers_n = 30;
+const int v2_think_fillers_n = 50;
 
 const char *v2_knowledge_intros[] = {
     "right",
@@ -55,9 +65,24 @@ const char *v2_knowledge_intros[] = {
     "aha",
     "indeed",
     "clearly",
-    "of course"
+    "of course",
+    "actually",
+    "listen",
+    "basically",
+    "fun fact",
+    "oh yeah",
+    "that said",
+    "now then",
+    "look",
+    "yo",
+    "yep",
+    "real talk",
+    "here's the thing",
+    "I mean",
+    "word",
+    "so yeah"
 };
-const int v2_knowledge_intros_n = 25;
+const int v2_knowledge_intros_n = 40;
 
 const char *v2_opinion_think_phrases[] = {
     "honestly",
@@ -81,6 +106,32 @@ const char *v2_opinion_think_phrases[] = {
     "I agree",
     "that tracks",
     "good point",
-    "fair enough"
+    "fair enough",
+    "valid",
+    "solid",
+    "real",
+    "based",
+    "yikes",
+    "sheesh",
+    "tough",
+    "huge",
+    "massive",
+    "crazy",
+    "legit",
+    "absurd",
+    "brilliant",
+    "genius",
+    "spicy",
+    "relatable",
+    "underrated",
+    "overrated",
+    "hard agree",
+    "can't argue",
+    "well said",
+    "spot on",
+    "couldn't agree more",
+    "seriously though",
+    "that's a take",
+    "totally"
 };
-const int v2_opinion_think_phrases_n = 22;
+const int v2_opinion_think_phrases_n = 48;

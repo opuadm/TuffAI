@@ -695,5 +695,15 @@ const char *v2_vocab[V2_VOCAB_SIZE] = {
     "shoal","silt","slope","snowfield","soil","spit","spring","steppe",
     "summit","swamp","taiga","talus","temperate","terrace","thicket","tideland",
     "timberline","topography","trench","tributary","tropical","trough","tundra","vale",
-    "vegetation","volcanic","waterfall","watershed","wetland","wilderness","windward","woodland"
+    "vegetation","volcanic","waterfall","watershed","wetland","wilderness","windward","woodland",
+
+    "entropy","tensor","gradient","scalar","heuristic","traversal","singleton","polymorphism",
+    "encapsulation","inheritance","abstraction","idempotent","deterministic","stochastic","latency","jitter",
+    "shard","replica","quorum","epoch","backpropagation","convolution","dropout","normalization",
+    "anchor","beacon","cipher","nonce","salt","digest","handshake",
+    "throttle","debounce","memoize","transpile","minification","polyfill","shim","thunk",
+    "coroutine","fiber","greenthread","futex","spinlock","barrier","latch","ringbuffer",
+    "bitmap","trie","bloom","skiplist","fenwick","segment","splay","treap",
+    "hamlet","tavern","lantern","anvil","cobblestone","mosaic","tapestry","parchment",
+    "quill","inkwell","compass","sextant","pendulum","prism"
 };

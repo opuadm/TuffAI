@@ -54,7 +54,7 @@ typedef struct {
 
 static const ModelDef models[] = {
     {
-        "TuffAI-v2 (Preview)",
+        "TuffAI-v2",
         "Latest TuffAI Version",
         75.0f,
         2.5f,
@@ -219,20 +219,25 @@ static void draw_chat(void) {
         engine_state.total_tokens, engine_state.turn_count, engine_state.cfg_temp, engine_state.cfg_noise,
         engine_state.cfg_freq_penalty, engine_state.cfg_rep_penalty, engine_state.cfg_top_p);
     attroff(A_REVERSE | COLOR_PAIR(COLOR_STATUS));
+
+    move(rows - 1, 0);
+    clrtoeol();
 }
 
 static void draw_input(const char *buf, int cursor) {
     int rows, cols;
     int input_row;
+    int max_display;
 
     getmaxyx(stdscr, rows, cols);
     input_row = rows - 2;
 
     move(input_row, 0);
     clrtoeol();
-    mvprintw(input_row, 0, "You: %s", buf);
-    move(input_row, 5 + cursor);
-    (void)cols;
+    max_display = cols - 6;
+    if (max_display < 0) max_display = 0;
+    mvprintw(input_row, 0, "You: %.*s", max_display, buf);
+    move(input_row, 5 + (cursor > max_display ? max_display : cursor));
 }
 
 static int str_casecmp(const char *a, const char *b) {

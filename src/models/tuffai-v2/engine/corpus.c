@@ -236,23 +236,24 @@ static void gen_wiki_drift(const char *input, char *out, int out_size) {
         written = snprintf(out, out_size, "%s", wiki2);
         got2 = 0;
     }
+    if (written >= out_size) written = out_size - 1;
 
     switch (rand() % 4) {
     case 0:
-        written += snprintf(out + written, out_size - written,
-            " which reminds me, ");
+        SAFE_SNPRINTF(written, out_size, snprintf(out + written, out_size - written,
+            " which reminds me, "));
         break;
     case 1:
-        written += snprintf(out + written, out_size - written,
-            " but more importantly, ");
+        SAFE_SNPRINTF(written, out_size, snprintf(out + written, out_size - written,
+            " but more importantly, "));
         break;
     case 2:
-        written += snprintf(out + written, out_size - written,
-            " anyway that's not the point, the point is ");
+        SAFE_SNPRINTF(written, out_size, snprintf(out + written, out_size - written,
+            " anyway that's not the point, the point is "));
         break;
     default:
-        written += snprintf(out + written, out_size - written,
-            " wait where was I... oh right, ");
+        SAFE_SNPRINTF(written, out_size, snprintf(out + written, out_size - written,
+            " wait where was I... oh right, "));
         break;
     }
 
@@ -423,7 +424,7 @@ static void gen_truncate(const char *input, char *out, int out_size) {
     cut = 20 + rand() % (len / 3 + 1);
     if (cut >= len) cut = len / 2;
     while (cut > 0 && wiki_text[cut] != ' ') cut--;
-    if (cut <= 0) cut = 20;
+    if (cut <= 0 || cut >= len) cut = len > 20 ? 20 : len;
     wiki_text[cut] = '\0';
     snprintf(out, out_size, "%s--", wiki_text);
 }
@@ -439,12 +440,12 @@ static void gen_repeat(const char *input, char *out, int out_size) {
     written = 0;
     for (i = 0; i < reps && written < out_size - 200; i++) {
         if (i > 0) {
-            written += snprintf(out + written, out_size - written, " ");
+            SAFE_SNPRINTF(written, out_size, snprintf(out + written, out_size - written, " "));
         }
-        written += snprintf(out + written, out_size - written, "%s", keyword);
+        SAFE_SNPRINTF(written, out_size, snprintf(out + written, out_size - written, "%s", keyword));
     }
     if (rand() % 2 == 0 && written < out_size - 2) {
-        written += snprintf(out + written, out_size - written, "?");
+        SAFE_SNPRINTF(written, out_size, snprintf(out + written, out_size - written, "?"));
     }
     (void)written;
 }
@@ -983,29 +984,32 @@ static void gen_pattern_mimic(const char *input, char *out, int out_size) {
 
     if (style == 0) {
         written = snprintf(out, out_size, "Top %d Facts About %s:\n\n", 3 + rand() % 5, keyword);
+        if (written >= out_size) written = out_size - 1;
         num_items = 3 + rand() % 5;
         for (i = 0; i < num_items && written < out_size - 100; i++) {
-            written += snprintf(out + written, out_size - written, "%d. %s\n",
-                                i + 1, v2_mimic_list_items[rand() % v2_mimic_list_items_n]);
+            SAFE_SNPRINTF(written, out_size, snprintf(out + written, out_size - written, "%d. %s\n",
+                                i + 1, v2_mimic_list_items[rand() % v2_mimic_list_items_n]));
         }
     } else if (style == 1) {
         written = snprintf(out, out_size, "Pros and Cons of %s:\n\nPros:\n", keyword);
+        if (written >= out_size) written = out_size - 1;
         num_items = 2 + rand() % 3;
         for (i = 0; i < num_items && written < out_size - 100; i++) {
-            written += snprintf(out + written, out_size - written, "- %s\n",
-                                v2_mimic_list_items[rand() % v2_mimic_list_items_n]);
+            SAFE_SNPRINTF(written, out_size, snprintf(out + written, out_size - written, "- %s\n",
+                                v2_mimic_list_items[rand() % v2_mimic_list_items_n]));
         }
-        written += snprintf(out + written, out_size - written, "\nCons:\n");
+        SAFE_SNPRINTF(written, out_size, snprintf(out + written, out_size - written, "\nCons:\n"));
         num_items = 2 + rand() % 3;
         for (i = 0; i < num_items && written < out_size - 100; i++) {
-            written += snprintf(out + written, out_size - written, "- %s\n",
-                                v2_mimic_list_items[rand() % v2_mimic_list_items_n]);
+            SAFE_SNPRINTF(written, out_size, snprintf(out + written, out_size - written, "- %s\n",
+                                v2_mimic_list_items[rand() % v2_mimic_list_items_n]));
         }
     } else {
         written = snprintf(out, out_size, "%s vs %s: The Ultimate Showdown\n\n", keyword, keyword2);
-        written += snprintf(out + written, out_size - written, "Winner: %s\nReason: %s\n",
+        if (written >= out_size) written = out_size - 1;
+        SAFE_SNPRINTF(written, out_size, snprintf(out + written, out_size - written, "Winner: %s\nReason: %s\n",
                             (rand() % 2) ? keyword : keyword2,
-                            v2_mimic_list_items[rand() % v2_mimic_list_items_n]);
+                            v2_mimic_list_items[rand() % v2_mimic_list_items_n]));
     }
     (void)written;
 }

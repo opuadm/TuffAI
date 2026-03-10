@@ -145,12 +145,12 @@ static void inject_obsession(char *buf, int buf_size,
                 written += obslen;
                 buf[written++] = ' ';
             } else {
-                written += snprintf(buf + written, buf_size - written,
-                    "(wait, %s?) ", obsession_word);
+                SAFE_SNPRINTF(written, buf_size, snprintf(buf + written, buf_size - written,
+                    "(wait, %s?) ", obsession_word));
             }
         }
         if (written > 0) buf[written++] = ' ';
-        written += snprintf(buf + written, buf_size - written, "%s", words[i]);
+        SAFE_SNPRINTF(written, buf_size, snprintf(buf + written, buf_size - written, "%s", words[i]));
     }
     buf[written] = '\0';
 }

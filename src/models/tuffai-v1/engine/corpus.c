@@ -232,23 +232,24 @@ static void gen_wiki_drift(const char *input, char *out, int out_size) {
         written = snprintf(out, out_size, "%s", wiki2);
         got2 = 0;
     }
+    if (written >= out_size) written = out_size - 1;
 
     switch (rand() % 4) {
     case 0:
-        written += snprintf(out + written, out_size - written,
-            " which reminds me, ");
+        SAFE_SNPRINTF(written, out_size, snprintf(out + written, out_size - written,
+            " which reminds me, "));
         break;
     case 1:
-        written += snprintf(out + written, out_size - written,
-            " but more importantly, ");
+        SAFE_SNPRINTF(written, out_size, snprintf(out + written, out_size - written,
+            " but more importantly, "));
         break;
     case 2:
-        written += snprintf(out + written, out_size - written,
-            " anyway that's not the point, the point is ");
+        SAFE_SNPRINTF(written, out_size, snprintf(out + written, out_size - written,
+            " anyway that's not the point, the point is "));
         break;
     default:
-        written += snprintf(out + written, out_size - written,
-            " wait where was I... oh right, ");
+        SAFE_SNPRINTF(written, out_size, snprintf(out + written, out_size - written,
+            " wait where was I... oh right, "));
         break;
     }
 
@@ -419,7 +420,7 @@ static void gen_truncate(const char *input, char *out, int out_size) {
     cut = 20 + rand() % (len / 3 + 1);
     if (cut >= len) cut = len / 2;
     while (cut > 0 && wiki_text[cut] != ' ') cut--;
-    if (cut <= 0) cut = 20;
+    if (cut <= 0 || cut >= len) cut = len > 20 ? 20 : len;
     wiki_text[cut] = '\0';
     snprintf(out, out_size, "%s--", wiki_text);
 }
@@ -435,12 +436,12 @@ static void gen_repeat(const char *input, char *out, int out_size) {
     written = 0;
     for (i = 0; i < reps && written < out_size - 200; i++) {
         if (i > 0) {
-            written += snprintf(out + written, out_size - written, " ");
+            SAFE_SNPRINTF(written, out_size, snprintf(out + written, out_size - written, " "));
         }
-        written += snprintf(out + written, out_size - written, "%s", keyword);
+        SAFE_SNPRINTF(written, out_size, snprintf(out + written, out_size - written, "%s", keyword));
     }
     if (rand() % 2 == 0 && written < out_size - 2) {
-        written += snprintf(out + written, out_size - written, "?");
+        SAFE_SNPRINTF(written, out_size, snprintf(out + written, out_size - written, "?"));
     }
     (void)written;
 }
