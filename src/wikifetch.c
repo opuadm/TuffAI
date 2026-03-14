@@ -23,11 +23,14 @@ typedef struct {
 
 static size_t write_callback(void *contents, size_t size, size_t nmemb, void *userp) {
     Buffer *buf = (Buffer *)userp;
-    size_t total = size * nmemb;
+    size_t total;
     size_t needed;
     size_t newcap;
     char *tmp;
 
+    if (nmemb > 0 && size > (size_t)-1 / nmemb) return 0;
+    total = size * nmemb;
+    if (total > 512 * 1024) return 0;
     needed = buf->size + total + 1;
     if (needed > buf->cap) {
         newcap = buf->cap * 2;
@@ -80,7 +83,7 @@ static char *find_json_string(const char *json, const char *key) {
     start++;
 
     end = start;
-    while (*end && !(*end == '"' && *(end - 1) != '\\')) end++;
+    while (*end && !(*end == '"' && (end == start || *(end - 1) != '\\'))) end++;
     if (!*end) return NULL;
 
     len = (int)(end - start);

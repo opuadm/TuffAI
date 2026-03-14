@@ -185,16 +185,31 @@ int sample_vocab(const float *target, float temperature, float noise,
     }
 
     if (top_p < 1.0f && top_p > 0.0f) {
-        thresh = sum * top_p;
-        cum = 0;
-        for (i = 0; i < vocab_size; i++) {
-            cum += scores[i];
-            if (cum > thresh) {
-                scores[i] = 0.0f;
+        int idx[MAX_VOCAB_SIZE];
+        int gap, si, sj, stmp;
+
+        for (si = 0; si < vocab_size; si++) idx[si] = si;
+        for (gap = vocab_size / 2; gap > 0; gap /= 2) {
+            for (si = gap; si < vocab_size; si++) {
+                stmp = idx[si];
+                for (sj = si; sj >= gap && scores[idx[sj - gap]] < scores[stmp]; sj -= gap)
+                    idx[sj] = idx[sj - gap];
+                idx[sj] = stmp;
             }
         }
-        sum = 0;
-        for (i = 0; i < vocab_size; i++) sum += scores[i];
+
+        thresh = sum * top_p;
+        cum = 0;
+        for (si = 0; si < vocab_size; si++) {
+            cum += scores[idx[si]];
+            if (cum > thresh) {
+                for (sj = si + 1; sj < vocab_size; sj++) {
+                    sum -= scores[idx[sj]];
+                    scores[idx[sj]] = 0.0f;
+                }
+                break;
+            }
+        }
     }
 
     r = ((float)rand() / RAND_MAX) * sum;

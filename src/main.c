@@ -33,6 +33,31 @@ static volatile int got_sigwinch = 0;
 static volatile int got_sigint = 0;
 static int train_mode = 0;
 
+typedef struct {
+    const char *cmd;
+    const char *desc;
+} SlashCmd;
+
+static const SlashCmd slash_cmds[] = {
+    {"/temp", "set temperature"},
+    {"/noise", "set noise level"},
+    {"/freq", "frequency penalty"},
+    {"/rep", "repetition penalty"},
+    {"/topp", "top-p sampling"},
+    {"/presence", "presence penalty"},
+    {"/maxwords", "max response words"},
+    {"/model", "switch model"},
+    {"/prompt", "edit system prompt"},
+    {"/wikifetch", "toggle wiki fetch"},
+    {"/train", "toggle train mode"},
+    {"/stats", "session statistics"},
+    {"/clear", "clear chat"},
+    {"/help", "show commands"},
+    {"/quit", "exit"},
+};
+
+#define SLASH_CMD_COUNT (int)(sizeof(slash_cmds) / sizeof(slash_cmds[0]))
+
 static char hist_buf[HIST_MAX][HIST_LEN];
 static int hist_tokens[HIST_MAX][MAX_TOKENS];
 static int hist_lens[HIST_MAX];
@@ -53,6 +78,7 @@ typedef struct {
 } ModelDef;
 
 static const ModelDef models[] = {
+#ifdef ENABLE_TUFFAI_V2
     {
         "TuffAI-v2",
         "Latest TuffAI Version",
@@ -64,6 +90,8 @@ static const ModelDef models[] = {
         10.0f,
         &engine_tuffai_v2,
     },
+#endif
+#ifdef ENABLE_TUFFAI_V1
     {
         "TuffAI-v1",
         "The Original TuffAI",
@@ -75,6 +103,7 @@ static const ModelDef models[] = {
         10.0f,
         &engine_tuffai_v1,
     },
+#endif
 };
 
 #define MODEL_COUNT (int)(sizeof(models) / sizeof(models[0]))
@@ -238,6 +267,79 @@ static void draw_input(const char *buf, int cursor) {
     if (max_display < 0) max_display = 0;
     mvprintw(input_row, 0, "You: %.*s", max_display, buf);
     move(input_row, 5 + (cursor > max_display ? max_display : cursor));
+}
+
+static void draw_autocomplete(const char *buf, int buflen) {
+    int rows, cols;
+    int matches[SLASH_CMD_COUNT];
+    int match_count = 0;
+    int i, j;
+    int box_y, box_x, box_w, box_h;
+    int cmd_len;
+    int desc_len;
+    int max_w;
+    char line[128];
+
+    if (buflen < 1 || buf[0] != '/') return;
+
+    for (i = 0; i < SLASH_CMD_COUNT; i++) {
+        if (strncmp(slash_cmds[i].cmd, buf, buflen) == 0) {
+            matches[match_count++] = i;
+        }
+    }
+
+    if (match_count == 0) return;
+    if (match_count == 1 && buflen == (int)strlen(slash_cmds[matches[0]].cmd)) return;
+
+    getmaxyx(stdscr, rows, cols);
+
+    max_w = 0;
+    for (i = 0; i < match_count; i++) {
+        desc_len = (int)strlen(slash_cmds[matches[i]].desc);
+        cmd_len = 13 + desc_len;
+        if (cmd_len > max_w)
+            max_w = cmd_len;
+    }
+
+    box_w = max_w + 4;
+    if (box_w < 30) box_w = 30;
+    if (box_w > cols - 2) box_w = cols - 2;
+    box_h = match_count + 2;
+    if (box_h > rows / 2) box_h = rows / 2;
+
+    box_x = 5;
+    box_y = rows - 3 - box_h;
+    if (box_y < 1) box_y = 1;
+
+    attron(COLOR_PAIR(COLOR_STATUS));
+    for (i = 0; i < box_h; i++) {
+        move(box_y + i, box_x);
+        for (j = 0; j < box_w && box_x + j < cols; j++)
+            addch(' ');
+    }
+
+    mvaddch(box_y, box_x, ACS_ULCORNER);
+    for (j = 1; j < box_w - 1; j++)
+        mvaddch(box_y, box_x + j, ACS_HLINE);
+    mvaddch(box_y, box_x + box_w - 1, ACS_URCORNER);
+    mvaddch(box_y + box_h - 1, box_x, ACS_LLCORNER);
+    for (j = 1; j < box_w - 1; j++)
+        mvaddch(box_y + box_h - 1, box_x + j, ACS_HLINE);
+    mvaddch(box_y + box_h - 1, box_x + box_w - 1, ACS_LRCORNER);
+    for (i = 1; i < box_h - 1; i++) {
+        mvaddch(box_y + i, box_x, ACS_VLINE);
+        mvaddch(box_y + i, box_x + box_w - 1, ACS_VLINE);
+    }
+    attroff(COLOR_PAIR(COLOR_STATUS));
+
+    for (i = 0; i < match_count && i < box_h - 2; i++) {
+        snprintf(line, sizeof(line), "%-12s %s",
+                 slash_cmds[matches[i]].cmd,
+                 slash_cmds[matches[i]].desc);
+        attron(A_BOLD | COLOR_PAIR(COLOR_STATUS));
+        mvaddnstr(box_y + 1 + i, box_x + 2, line, box_w - 4);
+        attroff(A_BOLD | COLOR_PAIR(COLOR_STATUS));
+    }
 }
 
 static int str_casecmp(const char *a, const char *b) {
@@ -881,9 +983,91 @@ static void sync_engine_state(void) {
     engine_state.color_ai = COLOR_AI;
 }
 
+static int count_shared_words(const char *a, const char *b) {
+    char bufa[PREV_RESPONSE_LEN];
+    char bufb[PREV_RESPONSE_LEN];
+    char *wa[128];
+    char *wb[128];
+    int na = 0;
+    int nb = 0;
+    int shared = 0;
+    int i, j;
+    char *p;
+
+    strncpy(bufa, a, PREV_RESPONSE_LEN - 1);
+    bufa[PREV_RESPONSE_LEN - 1] = '\0';
+    strncpy(bufb, b, PREV_RESPONSE_LEN - 1);
+    bufb[PREV_RESPONSE_LEN - 1] = '\0';
+
+    p = strtok(bufa, " \t\n.,!?;:'\"()[]{}");
+    while (p && na < 128) {
+        wa[na++] = p;
+        p = strtok(NULL, " \t\n.,!?;:'\"()[]{}");
+    }
+    p = strtok(bufb, " \t\n.,!?;:'\"()[]{}");
+    while (p && nb < 128) {
+        wb[nb++] = p;
+        p = strtok(NULL, " \t\n.,!?;:'\"()[]{}");
+    }
+
+    for (i = 0; i < na; i++) {
+        for (j = 0; j < nb; j++) {
+            if (str_casecmp(wa[i], wb[j]) == 0) {
+                shared++;
+                break;
+            }
+        }
+    }
+    return shared;
+}
+
+static float compute_repetition_boost(EngineState *st) {
+    int count;
+    int limit;
+    int i, j;
+    int overlap;
+    int total_overlap;
+    int pairs;
+    float avg_overlap;
+
+    count = st->prev_resp_count;
+    if (count < 2) return 0.0f;
+
+    limit = count < PREV_RESPONSE_MAX ? count : PREV_RESPONSE_MAX;
+    total_overlap = 0;
+    pairs = 0;
+
+    for (i = 0; i < limit; i++) {
+        for (j = i + 1; j < limit; j++) {
+            overlap = count_shared_words(st->prev_responses[i], st->prev_responses[j]);
+            total_overlap += overlap;
+            pairs++;
+        }
+    }
+
+    if (pairs == 0) return 0.0f;
+    avg_overlap = (float)total_overlap / (float)pairs;
+    if (avg_overlap < 3.0f) return 0.0f;
+    return (avg_overlap - 3.0f) * 0.5f;
+}
+
 static void generate_response(const char *input) {
+    float boost;
+    float orig_freq;
+    float orig_rep;
+
     sync_engine_state();
+
+    boost = compute_repetition_boost(&engine_state);
+    orig_freq = engine_state.cfg_freq_penalty;
+    orig_rep = engine_state.cfg_rep_penalty;
+    engine_state.cfg_freq_penalty += boost;
+    engine_state.cfg_rep_penalty += boost * 0.8f;
+
     models[current_model].engine->generate_response(&engine_state, &engine_callbacks, input);
+
+    engine_state.cfg_freq_penalty = orig_freq;
+    engine_state.cfg_rep_penalty = orig_rep;
 }
 
 static void handle_sigwinch(int sig) {
@@ -978,6 +1162,16 @@ int main(void) {
 
         draw_chat();
         draw_input(input_buf, input_pos);
+        if (input_pos > 0 && input_buf[0] == '/' && !strchr(input_buf, ' '))
+            draw_autocomplete(input_buf, input_pos);
+        {
+            int ir, ic;
+            int md;
+            getmaxyx(stdscr, ir, ic);
+            md = ic - 6;
+            if (md < 0) md = 0;
+            move(ir - 2, 5 + (input_pos > md ? md : input_pos));
+        }
         refresh();
 
         ch = getch();

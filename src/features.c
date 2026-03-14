@@ -54,7 +54,7 @@ Features extract(const char *s) {
         } else {
             if (!in_word) { words++; in_word = 1; } else cur_wlen++;
             lc = tolower(c);
-            if (strchr("aeiouáéíóúàèìòùäëïöüâêîôûаеёиоуыьъэюяеіїє", lc)) vowels++;
+            if (lc == 'a' || lc == 'e' || lc == 'i' || lc == 'o' || lc == 'u') vowels++;
         }
     }
     if (in_word) {

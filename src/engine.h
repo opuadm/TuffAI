@@ -73,7 +73,11 @@ typedef struct {
     int has_system_prompt;
 } EngineVtable;
 
+#ifdef ENABLE_TUFFAI_V1
 extern const EngineVtable engine_tuffai_v1;
+#endif
+#ifdef ENABLE_TUFFAI_V2
 extern const EngineVtable engine_tuffai_v2;
+#endif
 
 #endif
