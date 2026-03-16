@@ -101,6 +101,9 @@ static int do_fetch(const char *host, const char *path, char *out, int out_size)
     char url[1024];
     char *extract;
 
+    if (!out || out_size <= 0) return 0;
+    out[0] = '\0';
+    if (!host || !path) return 0;
     if (!wiki_runtime_enabled) return 0;
 
     buf.data = malloc(4096);
@@ -123,6 +126,12 @@ static int do_fetch(const char *host, const char *path, char *out, int out_size)
     curl_easy_setopt(curl, CURLOPT_USERAGENT, "TuffAI/5.0 (DumbBot)");
     curl_easy_setopt(curl, CURLOPT_TIMEOUT, 10L);
     curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
+    curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 1L);
+    curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 2L);
+#if defined(CURLOPT_PROTOCOLS) && defined(CURLOPT_REDIR_PROTOCOLS) && defined(CURLPROTO_HTTPS)
+    curl_easy_setopt(curl, CURLOPT_PROTOCOLS, (long)CURLPROTO_HTTPS);
+    curl_easy_setopt(curl, CURLOPT_REDIR_PROTOCOLS, (long)CURLPROTO_HTTPS);
+#endif
 
     res = curl_easy_perform(curl);
     curl_easy_cleanup(curl);

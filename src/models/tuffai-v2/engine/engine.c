@@ -16,7 +16,12 @@ static int compute_smart_length(const Features *feat, int pattern, int input_wor
     float chaos;
     int result;
 
-    if (cfg_max_words > 0) return cfg_max_words;
+    if (cfg_max_words > 0) {
+        result = cfg_max_words;
+        if (max_output_tokens > 0 && result > max_output_tokens) result = max_output_tokens;
+        if (result < 1) result = 1;
+        return result;
+    }
 
     if (pattern == PAT_MATH) {
         base = 40.0f + (float)(rand() % 200);

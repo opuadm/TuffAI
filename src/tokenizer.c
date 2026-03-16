@@ -451,6 +451,9 @@ int tokenize(const char *input, int *tokens, int max_tok) {
     const char *replacement;
     unsigned h;
 
+    if (!input || !tokens || max_tok <= 0) return 0;
+    if (!input[0]) return 0;
+
     strncpy(buf, input, 2047);
     buf[2047] = '\0';
     for (p = buf; *p; p++) *p = tolower((unsigned char)*p);

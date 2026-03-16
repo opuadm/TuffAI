@@ -1,6 +1,8 @@
 #define _POSIX_C_SOURCE 200809L
 #include <stdio.h>
 #include <stdlib.h>
+#include <errno.h>
+#include <limits.h>
 #include <string.h>
 #include <math.h>
 #include <time.h>
@@ -214,6 +216,7 @@ static void draw_chat(void) {
     int cpair;
 
     getmaxyx(stdscr, rows, cols);
+    clear();
 
     move(0, 0);
     attron(A_BOLD | COLOR_PAIR(COLOR_STATUS));
@@ -307,7 +310,7 @@ static void draw_autocomplete(const char *buf, int buflen) {
     box_h = match_count + 2;
     if (box_h > rows / 2) box_h = rows / 2;
 
-    box_x = 5;
+    box_x = 0;
     box_y = rows - 3 - box_h;
     if (box_y < 1) box_y = 1;
 
@@ -337,7 +340,7 @@ static void draw_autocomplete(const char *buf, int buflen) {
                  slash_cmds[matches[i]].cmd,
                  slash_cmds[matches[i]].desc);
         attron(A_BOLD | COLOR_PAIR(COLOR_STATUS));
-        mvaddnstr(box_y + 1 + i, box_x + 2, line, box_w - 4);
+        mvaddnstr(box_y + 1 + i, box_x + 1, line, box_w - 2);
         attroff(A_BOLD | COLOR_PAIR(COLOR_STATUS));
     }
 }
@@ -687,6 +690,8 @@ static int handle_command(const char *cmd) {
     float val;
     int i;
     char model_line[256];
+    char *end;
+    long parsed;
 
     if (cmd[0] != '/') return 0;
 
@@ -887,16 +892,23 @@ static int handle_command(const char *cmd) {
     }
 
     if (strcmp(name, "/maxwords") == 0) {
-        n = atoi(arg);
-        if (n >= 0 && n <= 100000) {
-            engine_state.cfg_max_words = n;
-            if (n == 0) {
+        int model_max = models[current_model].engine->max_output_tokens;
+        errno = 0;
+        end = NULL;
+        parsed = strtol(arg, &end, 10);
+        if (arg[0] != '\0' && end && end != arg && *end == '\0' && errno != ERANGE && parsed >= 0 && parsed <= INT_MAX) {
+            if (parsed > model_max) {
+                parsed = model_max;
+                chat_add("Value exceeds model limit; using maximum allowed.");
+            }
+            engine_state.cfg_max_words = (int)parsed;
+            if (engine_state.cfg_max_words == 0) {
                 chat_add("Max words set to auto.");
             } else {
                 chat_add("Max words override set.");
             }
         } else {
-            chat_add("Invalid value (0-100000, 0=auto).");
+            chat_add("Invalid value (0=auto, non-negative integer).");
         }
         return 1;
     }
@@ -922,12 +934,18 @@ static void show_status(const char *msg) {
 }
 
 static void sleep_with_scroll(int ms) {
-    int elapsed = 0;
+    int elapsed;
     int ch;
     int chunk;
 
-    timeout(20);
+    if (ms <= 0) return;
+    elapsed = 0;
+
     while (elapsed < ms) {
+        chunk = ms - elapsed;
+        if (chunk > 20) chunk = 20;
+        if (chunk < 1) chunk = 1;
+        timeout(chunk);
         ch = getch();
         if (ch == KEY_UP) {
             if (chat_scroll < chat_count - 1) chat_scroll++;
@@ -948,9 +966,8 @@ static void sleep_with_scroll(int ms) {
             draw_chat();
             refresh();
         }
-        chunk = (ms - elapsed) < 20 ? (ms - elapsed) : 20;
         if (ch == ERR) napms(chunk);
-        elapsed += 20;
+        elapsed += chunk;
     }
     timeout(-1);
 }

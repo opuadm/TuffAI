@@ -98,6 +98,10 @@ void v2_extract_keyword_ext(const char *input, char *keyword, int kw_size) {
     int best_score = -1;
     int i, wlen, score;
 
+    if (!keyword || kw_size <= 0) return;
+    keyword[0] = '\0';
+    if (!input) return;
+
     strncpy(buf, input, 2047);
     buf[2047] = '\0';
 

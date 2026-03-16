@@ -70,6 +70,11 @@ int markov_generate(const char *seed_text, char *out, int out_size, int max_word
     int i;
     int wlen;
 
+    if (!out || out_size <= 0) return 0;
+    out[0] = '\0';
+    if (!seed_text) return 0;
+    if (max_words < 0) max_words = 0;
+
     got_wiki = 0;
     if (rand() % 2 == 0) {
         got_wiki = wiki_fetch_search(seed_text, wiki_buf, sizeof(wiki_buf));

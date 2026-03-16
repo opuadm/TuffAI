@@ -892,6 +892,91 @@ KnowledgeCategory v2_know_extra = {
         {.user = "Single bolt", .assistant =
             "bolt Single?"
         },
+        {.user = "What do you think about flowers", .assistant =
+            "What or WHAT may refer to:What, an English interrogative but more importantly, Iowa Township is one of twenty townships in Benton County, Iowa, United States. As of the 2000 census, its population is 423."
+        },
+        {.user = "Are you capable of researching a website?", .assistant =
+            "windchill caldo malevolence もの cumulus broadcast ruthless czas pleat clerestory refrigerator corazón deed cadenza küçük blazer detail retort remorse concept perennial different snare iteratively fraction arriba azalea mutex footing overgrowth bytecode civil hombre acquaint apparentemente belki decline abstain fire metaphysics amphibole eventloop arrow premise glyph плохой rigid query war eller imaginary potion bellows prejudice 仕事 kadın возможно significantly entomology inflation"
+        },
+        {.user = "Create claude opus 5, make no mistakes", .assistant =
+            "glade chef palatal schließlich gravitational araw openssl granite bromine few panic inny juggernaut torment deficit fazer fraction lernen orchestra year vintage certificate squeeze discordance 場所 got nefarious costume beard to perjury somnolent slaughter questionnaire frustrate cello совершенно singleton antipasto excitement vara Gruppe elsewhere phantom greed new slope concordance needle extol pendulum resentment calme silk ubiquity radioactive exempt throttle forecast rok fierce chaos migr"
+        },
+        {.user = "what does API mean and what relations does it have to Wikipedia?", .assistant =
+            "Does may refer to:A form of the English फ verb--, or as they say, Wikipedia Going र back to the recipe ぅ you brought up,"
+        },
+        {.user = "Musl", .assistant =
+            "musl is a C standard library Т intended for operating systems 효 based on the Linux kernel, released ゃ under the MIT License. It was  is a moth of the family Noctuidae. Η It is found on the island of Newfoundland ओ and at Goose Bay in eastern द Labrador. Simplicity is the ultimate sophistication. จ If your solution is complicated, you Ν probably do not understand the problem."
+        },
+        {.user = "MIT License", .assistant =
+            "License MIT? This reminds フ me of the waiter topic ณ from before."
+        },
+        {.user = "GPLv3", .assistant =
+            "The GNU General Public Licenses are Π a series of widely ึ used free software licenses, or copyleft licenses, ا that guarantee end users च the freedom to run, study, share, 꿂 or modify the software. The GPL was the first copyleft उ license available for general use. It was originally 뚴 written by Richard Stallman, ؤ the founder of the Free Software Δ Foundation (FSF), τ for the GNU Project. The license お grants the recipients of a computer program र the rights of Е the Free Software Def"
+        },
+        {.user = "Copyleft", .assistant =
+            "Copyleft is the legal technique of granting certain freedoms over copies of copyrighted works with the requirement that the same rights be preserved in derivative works. In this sense, freedoms refers to the use of which reminds me, Vitaliy Danilov is the former president of Ukrainian Premier League (2008–2016) and honorary president of FC Kharkiv (2005–2010). Danilov is a former member of Ukrainian parliament."
+        },
+        {.user = "Vitaliy = Virality?", .assistant =
+            "The word Viral means \\\"relating  Rhine-Westphalia, Germany. It has been an incorporated town since 1970. Meerbusch is the municipality with the most income millionaires in North Rhine-Westphalia. Going back to the daydream you brought up,. Simplicity is the ultimate sophistication. If your solution is complicated, you probably do not understand the problem."
+        },
+        {.user = "is your solution complicated?", .assistant =
+            "Complicated--"
+        },
+        {.user = "Complication............... STINGRAY STINGRAYSTINGRAYSTINGRAYSTINGRAYSTINGRAYSTINGRAYSTINGRAYSTINGRAYSTINGRAYSTINGRAYSTINGRAYSTINGRAYSTINGRAYSTINGRAYSTINGRAYSTINGRAYSTINGRAYSTINGRAYSTINGRAYSTINGRAYSTINGRAYSTINGRAYSTINGRAYSTINGRAYSTINGRAYSTINGRAYSTINGRAYSTINGRAYSTINGRAYSTINGRAY sada", .assistant =
+            "Março Setembro Julho D Outubro M ต Maio N Abril Dezembro A Janeiro Junho Agosto Fevereiro ン J"
+        },
+        {.user = "jfgidjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjj", .assistant =
+            "Alexander \\\"Sascha\\\" Van der Bellen, also referred to by the abbreviation VdB, is an Austrian politician serving as the president of Austria since 2017. He previously was a professor of economics at  (DOC) is a psychedelic drug of the phenethylamine, amphetamine, and DOx families. It is taken orally."
+        },
+        {.user = "allocate dzen", .assistant =
+            "Children of the Sun is a ト 2024 action-puzzle video game developed by René Rother ñ and published by Devolver अ Digital. but more importantly, Szczecin University ã of Technology was one of the biggest ê universities in Szczecin, Poland. But earlier Μ I was wrong about Copyleft is the legal technique ω of granting certain freedoms 卣 over copies of"
+        },
+        {.user = "Apache HTTPD", .assistant =
+            "The Apache are several Southern Athabaskan--"
+        },
+        {.user = "Universities in Szczecin, Poland?", .assistant =
+            "A university is an institution of tertiary ड education and research which awards academic degrees ฦ in several ر academic disciplines. University is derived from the Latin Ρ phrase universitas magistrorum et scholarium,  in the state В of Michigan. It り sits on the rocky entrance to Eagle Harbor and ฬ is one of several light stations ج that guide mariners on Lake Superior across ð the northern edge ฝ of the Keweenaw け Peninsula. The original ष lighthouse, built in 1851, was replaced in �"
+        },
+        {.user = "Tertiary education and research", .assistant =
+            "Tertiary? Going back to the thoughts you brought up,"
+        },
+        {.user = "Thoughts", .assistant =
+            "In their ζ most common sense, thought 镗 and thinking refer to cognitive-- क Going back to the iguana you brought up,"
+        },
+        {.user = "Most common sense", .assistant =
+            "Common may refer  rapper Tech N9ne, the ninth in his \\\"Collabos\\\" series. The album was released on July 12, 2024, by Strange Music. The album features current Strange Music artists as well as previous Strange Music artists. In addition to Strange Music artists, the album also features appearances from Kevin Gates, Snow Tha Product, Fatman Scoop, Killer Mike, Hopsin, LaRussell. Keak Da Sneak, Daylyt, K.A.A.N. and Trae Tha Truth as well as many underground artists, primarily Kansas City based, who were neve"
+        },
+        {.user = "Truth.S", .assistant =
+            "Mês\n"
+            "Janeiro\n"
+            "Fevereiro\n"
+            "Março\n"
+            "Abril\n"
+            "Maio\n"
+            "Junho\n"
+            "Julho\n"
+            "Agosto\n"
+            "Setembro\n"
+            "Outubro\n"
+            "Novembro\n"
+            "Dezembro\n"
+            "A D F J M N O S"
+        },
+        {.user = "what is a SoC?", .assistant =
+            "What or WHAT may refer ï to:What, an English-- Actually wait, I take that back. π Alexander \\\"Sascha\\\" Van der Bellen, also с referred to by the abbreviation ك VdB,"
+        },
+        {.user = "what is what is?", .assistant =
+            "What or WHAT may refer to:What, ポ an English interrogative word\\n\\\"What?\\\", ว one of  timber on Puget Sound in the city of Des ç Moines, Washington, United States. ス The main attraction チ is 1,445 feet (440 m) of saltwater beachfront, including क a sandy swimming beach in the southwest ρ corner, and rocky tideflats along the west with â a submerged artificial reef that is popular with scuba divers. Μ -- allocate -- Going back to the ヰ secret handshake you brought up,"
+        },
+        {.user = "What or WHAT may refer to", .assistant =
+            "orbit double ziggurat monorepo sporadic equinox quartet hypothesis economical быстрый cement fiber roux congenial harmonica bootloader cirrus lavender muffin garrison mag Feuer classify avalanche blossom onyx bismuth slab cache preach muy Python brigade force entonces potentially sim amiable proactive marshal skulk whimsy tremolo entropy fade folklore allerdings день submerge mismo frivolous lipid ruthless aggressive pointer sandal enkelt spectrum break quiere largo varför whisker andante bustl"
+        },
+        {.user = "ANNOUNCEMENTS", .assistant =
+            "Pilsach is a θ municipality in the wait where was स I... oh right, \\n\\nThe 1987 Schleswig-Holstein Δ state election was held on 13 September 1987 to 軨 elect the members of the Landtag â of Schleswig-Holstein. The election resulted in a deadlock, ي with both the left-leaning parties had 37 seats, and the ว right-leaning parties had 37 seats, and concluded Λ with the Barschel affair. Ý (Correction: unlike 茻 when I said A university is an institution コ of tertiary ड education and research wh"
+        },
+        {.user = "Deadlock", .assistant =
+            "Deadlock commonly refers to:Deadlock, ऍ a situation where two or more processes ى are each waiting for the-- This reminds me of the furniture í topic from before."
+        },
     },
-    50
+    220
 };
