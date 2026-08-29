@@ -1,1119 +1,1261 @@
+#define _XOPEN_SOURCE 700
 #include "../../../engine.h"
 #include "../../../net.h"
 #include "../../../features.h"
-#include "../../../corpus.h"
 #include "../../../tokenizer.h"
-#include "../../../wikifetch.h"
 #include "../../../knowledge/knowledge.h"
+#include "../../../rng.h"
+#include "../../../websearch.h"
+#include "../retrieval.h"
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
-#include <math.h>
 #include <ctype.h>
+#include <limits.h>
+#include <math.h>
+#include <wchar.h>
+#include <wctype.h>
 
-static int compute_smart_length(const Features *feat, int pattern, int input_words, int cfg_max_words, int max_output_tokens) {
-    float base;
-    float chaos;
-    int result;
+#define V2_CONTEXT_TOKENS 4096
+#define V2_RECENT_WORDS RENDERED_RECENT_MAX
+#define V2_WORD_LEN RENDERED_WORD_LEN
+#define V2_BIAS_TOKENS 512
+#define V2_MAX_RESPONSE_WORDS 1000
+#define V2_CODE_RESPONSE_SIZE 65536
+#define V2_ACTIVE_ATTENTION_TOKENS 256
+#define V2_SEARCH_TEXT_SIZE 65536
+#define V2_SOURCE_WORDS 2048
 
-    if (cfg_max_words > 0) {
-        result = cfg_max_words;
-        if (max_output_tokens > 0 && result > max_output_tokens) result = max_output_tokens;
-        if (result < 1) result = 1;
-        return result;
+static void append_context_token(int *tokens, int *count, int token) {
+    if (*count >= V2_CONTEXT_TOKENS) {
+        memmove(tokens, tokens + 1, (V2_CONTEXT_TOKENS - 1) * sizeof(int));
+        *count = V2_CONTEXT_TOKENS - 1;
     }
-
-    if (pattern == PAT_MATH) {
-        base = 40.0f + (float)(rand() % 200);
-        base *= (1.0f + feat->digit_ratio * 8.0f);
-    } else if (pattern == PAT_QUESTION && input_words <= 5) {
-        base = 15.0f + (float)(rand() % 60);
-        if (feat->entropy < 0.4f) base *= 2.5f;
-    } else if (pattern == PAT_QUESTION && input_words > 5) {
-        base = 5.0f + (float)(rand() % 20);
-    } else if (pattern == PAT_GREETING) {
-        base = 3.0f + (float)(rand() % 8);
-    } else if (pattern == PAT_TIME) {
-        base = 20.0f + (float)(rand() % 150);
-        base *= (1.0f + feat->is_question * 3.0f);
-    } else if (pattern == PAT_TECH) {
-        base = 30.0f + (float)(rand() % 300);
-    } else if (pattern == PAT_EMOTIONAL) {
-        base = 10.0f + (float)(rand() % 40);
-    } else if (pattern == PAT_COMMAND) {
-        base = 50.0f + (float)(rand() % 250);
-    } else {
-        base = (float)input_words * (0.5f + ((float)rand() / RAND_MAX) * 4.0f);
-        base += (float)(rand() % 30);
-    }
-
-    chaos = sinf((float)rand()) * 0.6f + ((float)rand() / RAND_MAX) * 0.4f;
-    base *= (0.5f + chaos);
-
-    if (feat->entropy > 0.6f) base *= 0.7f;
-    if (feat->upper_ratio > 0.5f) base *= 1.8f;
-    if (feat->punct_ratio > 0.2f) base *= 1.3f;
-
-    result = (int)base;
-    if (result < MIN_GEN) result = MIN_GEN;
-    if (result > max_output_tokens) result = max_output_tokens;
-    return result;
+    tokens[(*count)++] = token;
 }
 
-static void scramble_context(float *ctx, float intensity) {
-    int d;
-    int swap_a, swap_b;
-    float tmp;
-
-    for (d = 0; d < EMBED_DIM; d++) {
-        ctx[d] += frand_r() * intensity;
-        ctx[d] *= (0.7f + frand_r() * 0.6f);
-    }
-
-    for (d = 0; d < EMBED_DIM / 2; d++) {
-        swap_a = rand() % EMBED_DIM;
-        swap_b = rand() % EMBED_DIM;
-        tmp = ctx[swap_a];
-        ctx[swap_a] = ctx[swap_b];
-        ctx[swap_b] = tmp;
-    }
-}
-
-static void inject_history_chaos(int *mixed, int *mixed_n, int max_mix,
-                                  char (*hist_buf)[HIST_LEN],
-                                  int (*hist_tokens)[MAX_TOKENS],
-                                  int *hist_lens, int hist_cnt) {
-    int num_injections, i, slot, pos, tok_idx;
-
-    (void)hist_buf;
-    if (hist_cnt < 2) return;
-
-    num_injections = 1 + rand() % 3;
-    for (i = 0; i < num_injections && *mixed_n < max_mix; i++) {
-        slot = rand() % (hist_cnt < HIST_MAX ? hist_cnt : HIST_MAX);
-        if (hist_lens[slot] > 0) {
-            pos = rand() % hist_lens[slot];
-            tok_idx = hist_tokens[slot][pos];
-            mixed[(*mixed_n)++] = tok_idx;
-        }
-    }
-}
-
-static void derail_embed(float *target, int step, int max_words) {
-    float drift;
-    int d;
-    int random_word;
-
-    drift = 0.3f + (float)step / (float)max_words * 0.7f;
-
-    for (d = 0; d < EMBED_DIM; d++)
-        target[d] = target[d] * (1.0f - drift * 0.5f) + frand_r() * drift;
-
-    if (rand() % 6 == 0) {
-        random_word = rand() % V2_VOCAB_SIZE;
-        for (d = 0; d < EMBED_DIM; d++)
-            target[d] = target[d] * 0.4f + embeddings[random_word][d] * 0.6f;
-    }
-}
-
-static void inject_obsession(char *buf, int buf_size,
-                              const char *obsession_word, int obsession_strength) {
-    char tmp[8192];
-    char *words[256];
-    int nwords = 0;
-    char *p;
-    int i, written;
-    int inject_at;
-    int obslen;
-
-    if (obsession_strength < 2 || !obsession_word[0]) return;
-    if (rand() % 100 >= 20 + obsession_strength * 10) return;
-
-    strncpy(tmp, buf, sizeof(tmp) - 1);
-    tmp[sizeof(tmp) - 1] = '\0';
-    p = strtok(tmp, " ");
-    while (p && nwords < 256) {
-        words[nwords++] = p;
-        p = strtok(NULL, " ");
-    }
-    if (nwords < 3) return;
-
-    obslen = (int)strlen(obsession_word);
-    inject_at = rand() % nwords;
-    written = 0;
-
-    for (i = 0; i < nwords && written < buf_size - obslen - 10; i++) {
-        if (i == inject_at) {
-            if (written > 0) buf[written++] = ' ';
-            if (rand() % 2 == 0) {
-                memcpy(buf + written, obsession_word, obslen);
-                written += obslen;
-                buf[written++] = ' ';
-            } else {
-                SAFE_SNPRINTF(written, buf_size, snprintf(buf + written, buf_size - written,
-                    "(wait, %s?) ", obsession_word));
-            }
-        }
-        if (written > 0) buf[written++] = ' ';
-        SAFE_SNPRINTF(written, buf_size, snprintf(buf + written, buf_size - written, "%s", words[i]));
-    }
-    buf[written] = '\0';
-}
-
-static void inject_absorbed(char *buf, int buf_size,
-                              char absorbed_words[][TOPIC_WORD_LEN], int absorbed_n) {
-    char suffix[256];
-    int slen;
-    int blen;
-    int pick;
-
-    if (absorbed_n == 0) return;
-    if (rand() % 100 >= 15) return;
-
-    pick = rand() % absorbed_n;
-    switch (rand() % 4) {
-    case 0:
-        snprintf(suffix, sizeof(suffix), " (much like %s)", absorbed_words[pick]);
-        break;
-    case 1:
-        snprintf(suffix, sizeof(suffix), " which is basically %s", absorbed_words[pick]);
-        break;
-    case 2:
-        snprintf(suffix, sizeof(suffix), ", or as they say, %s", absorbed_words[pick]);
-        break;
-    default:
-        snprintf(suffix, sizeof(suffix), " -- %s --", absorbed_words[pick]);
-        break;
-    }
-
-    slen = (int)strlen(suffix);
-    blen = (int)strlen(buf);
-    if (blen + slen < buf_size - 1) {
-        memcpy(buf + blen, suffix, slen);
-        buf[blen + slen] = '\0';
-    }
-}
-
-static void inject_contradiction(char *buf, int buf_size,
-                                  char prev_responses[][PREV_RESPONSE_LEN],
-                                  int prev_resp_count) {
-    int old_slot;
-    char fragment[128];
-    int flen, blen;
-    int old_len, cut;
-    char prefix[64];
-    int plen;
-
-    if (prev_resp_count < 2) return;
-    if (rand() % 100 >= 12) return;
-
-    old_slot = rand() % (prev_resp_count < PREV_RESPONSE_MAX ? prev_resp_count : PREV_RESPONSE_MAX);
-    old_len = (int)strlen(prev_responses[old_slot]);
-    if (old_len < 10) return;
-
-    cut = old_len > 80 ? 80 : old_len;
-    while (cut > 0 && prev_responses[old_slot][cut] != ' ') cut--;
-    if (cut <= 0) cut = old_len > 80 ? 80 : old_len;
-    memcpy(fragment, prev_responses[old_slot], cut);
-    fragment[cut] = '\0';
-
-    switch (rand() % 4) {
-    case 0:
-        snprintf(prefix, sizeof(prefix), " Actually wait, I take that back. ");
-        break;
-    case 1:
-        snprintf(prefix, sizeof(prefix), " No, ignore what I said before about ");
-        break;
-    case 2:
-        snprintf(prefix, sizeof(prefix), " (Correction: unlike when I said ");
-        break;
-    default:
-        snprintf(prefix, sizeof(prefix), " But earlier I was wrong about ");
-        break;
-    }
-
-    plen = (int)strlen(prefix);
-    flen = (int)strlen(fragment);
-    blen = (int)strlen(buf);
-
-    if (blen + plen + flen + 2 < buf_size) {
-        memcpy(buf + blen, prefix, plen);
-        memcpy(buf + blen + plen, fragment, flen);
-        buf[blen + plen + flen] = '\0';
-    }
-}
-
-static int is_common_word(const char *w) {
-    static const char *common[] = {
-        "the","a","an","is","it","was","are","am","be","have","has",
-        "do","does","did","will","would","could","should","can",
-        "i","you","we","they","he","she","me","my","your","our",
-        "this","that","what","which","who","when","where","why","how",
-        "if","but","and","or","not","no","yes","so","very","too",
-        "for","from","with","about","to","of","in","on","at","by",
-        "up","down","out","off","tell","show","please","want","like",
-        "know","think","say","make","get","go","just","also",
-        NULL
-    };
-    char lower[64];
+static void append_context_tokens(int *tokens, int *count, const int *source, int source_count) {
     int i;
-    int len;
 
-    len = (int)strlen(w);
-    if (len >= 63 || len < 3) return 1;
-    for (i = 0; i < len; i++) lower[i] = (char)tolower((unsigned char)w[i]);
-    lower[len] = '\0';
-    for (i = 0; common[i]; i++) {
-        if (strcmp(lower, common[i]) == 0) return 1;
+    for (i = 0; i < source_count; i++) append_context_token(tokens, count, source[i]);
+}
+
+static void push_history(EngineState *state, const char *input, const int *tokens, int token_count) {
+    int slot;
+    int copy_count;
+    size_t input_len;
+
+    slot = *state->hist_cnt % HIST_MAX;
+    input_len = strlen(input);
+    if (input_len >= HIST_LEN) input_len = HIST_LEN - 1;
+    memcpy(state->hist_buf[slot], input, input_len);
+    state->hist_buf[slot][input_len] = '\0';
+    copy_count = token_count < MAX_TOKENS ? token_count : MAX_TOKENS;
+    memcpy(state->hist_tokens[slot], tokens, copy_count * sizeof(int));
+    state->hist_lens[slot] = copy_count;
+    (*state->hist_cnt)++;
+}
+
+static void build_context(EngineState *state, const char *input,
+                          const V2Retrieval *retrieval,
+                          const char *search_text, int *context,
+                          int *context_count, int *input_tokens,
+                          int *input_count) {
+    int temp_tokens[MAX_TOKENS];
+    int search_tokens[V2_CONTEXT_TOKENS];
+    int temp_count;
+    int available_history;
+    int history_count;
+    int history_slot;
+    int i;
+
+    *context_count = 0;
+    *input_count = v2_tokenize(input, input_tokens, MAX_TOKENS);
+    if (state->system_prompt[0]) {
+        temp_count = v2_tokenize(state->system_prompt, temp_tokens, MAX_TOKENS);
+        append_context_tokens(context, context_count, temp_tokens, temp_count);
+    }
+    available_history = *state->hist_cnt < HIST_MAX ? *state->hist_cnt : HIST_MAX;
+    history_count = available_history < 3 ? available_history : 3;
+    for (i = history_count; i > 0; i--) {
+        history_slot = (*state->hist_cnt - i + HIST_MAX) % HIST_MAX;
+        append_context_tokens(context, context_count, state->hist_tokens[history_slot], state->hist_lens[history_slot]);
+    }
+    if (state->self_ctx_len > 0)
+        append_context_tokens(context, context_count, state->self_ctx_tokens, state->self_ctx_len);
+    if (retrieval->text) {
+        temp_count = v2_tokenize(retrieval->text, temp_tokens, MAX_TOKENS);
+        if (temp_count > 48) temp_count = 48;
+        append_context_tokens(context, context_count, temp_tokens, temp_count);
+    }
+    if (search_text && search_text[0]) {
+        temp_count = v2_tokenize(search_text, search_tokens,
+                                 V2_CONTEXT_TOKENS);
+        append_context_tokens(context, context_count, search_tokens,
+                              temp_count);
+    }
+    append_context_tokens(context, context_count, input_tokens, *input_count);
+}
+
+static int model_wants_search(const char *input, const Features *features,
+                              const V2Retrieval *retrieval) {
+    int probability;
+
+    if (!web_search_enabled()) return 0;
+    if (web_search_requested(input)) return 1;
+    if (retrieval->is_code || retrieval->requested_words > 0) return 0;
+    probability = 2;
+    probability += (int)(features->is_question * 48.0f);
+    probability += (int)(features->has_number * 8.0f);
+    probability += (int)(features->long_word_ratio * 16.0f);
+    probability += (int)(features->entropy * 10.0f);
+    if (retrieval->score < 20) probability += 20;
+    if (retrieval->matches == 0) probability += 10;
+    if (probability > 82) probability = 82;
+    return rng_range(100) < probability;
+}
+
+static void build_memory_bias(EngineState *state, const int *input_tokens,
+                              int input_count, int *bias_tokens,
+                              int *bias_count) {
+    int available_history;
+    int history_count;
+    int history_slot;
+    int copy_count;
+    int i;
+
+    *bias_count = 0;
+    available_history = *state->hist_cnt < HIST_MAX ?
+                        *state->hist_cnt : HIST_MAX;
+    history_count = available_history < 3 ? available_history : 3;
+    for (i = history_count; i > 0; i--) {
+        history_slot = (*state->hist_cnt - i + HIST_MAX) % HIST_MAX;
+        copy_count = state->hist_lens[history_slot];
+        if (*bias_count + copy_count > V2_BIAS_TOKENS)
+            copy_count = V2_BIAS_TOKENS - *bias_count;
+        if (copy_count > 0) {
+            memcpy(bias_tokens + *bias_count,
+                   state->hist_tokens[history_slot],
+                   copy_count * sizeof(int));
+            *bias_count += copy_count;
+        }
+    }
+    copy_count = input_count;
+    if (*bias_count + copy_count > V2_BIAS_TOKENS) {
+        copy_count = V2_BIAS_TOKENS - *bias_count;
+        if (copy_count < input_count)
+            input_tokens += input_count - copy_count;
+    }
+    if (copy_count > 0) {
+        memcpy(bias_tokens + *bias_count, input_tokens,
+               copy_count * sizeof(int));
+        *bias_count += copy_count;
+    }
+}
+
+static int decode_utf8(const char *text, int available, unsigned int *codepoint) {
+    const unsigned char *bytes;
+    unsigned int value;
+    int length;
+    int i;
+
+    bytes = (const unsigned char *)text;
+    if (available <= 0 || bytes[0] == 0) return 0;
+    if (bytes[0] < 0x80) {
+        *codepoint = bytes[0];
+        return 1;
+    }
+    if ((bytes[0] & 0xE0) == 0xC0) {
+        value = bytes[0] & 0x1F;
+        length = 2;
+        if (value < 2) return 0;
+    } else if ((bytes[0] & 0xF0) == 0xE0) {
+        value = bytes[0] & 0x0F;
+        length = 3;
+    } else if ((bytes[0] & 0xF8) == 0xF0) {
+        value = bytes[0] & 0x07;
+        length = 4;
+    } else {
+        return 0;
+    }
+    if (length > available) return 0;
+    for (i = 1; i < length; i++) {
+        if ((bytes[i] & 0xC0) != 0x80) return 0;
+        value = (value << 6) | (bytes[i] & 0x3F);
+    }
+    if ((length == 3 && value < 0x800) ||
+        (length == 4 && value < 0x10000) ||
+        value > 0x10FFFF ||
+        (value >= 0xD800 && value <= 0xDFFF)) return 0;
+    *codepoint = value;
+    return length;
+}
+
+static int encode_utf8(unsigned int codepoint, char *output,
+                       int output_size) {
+    if (codepoint <= 0x7F) {
+        if (output_size < 2) return 0;
+        output[0] = (char)codepoint;
+        output[1] = '\0';
+        return 1;
+    }
+    if (codepoint <= 0x7FF) {
+        if (output_size < 3) return 0;
+        output[0] = (char)(0xC0 | (codepoint >> 6));
+        output[1] = (char)(0x80 | (codepoint & 0x3F));
+        output[2] = '\0';
+        return 2;
+    }
+    if (codepoint <= 0xFFFF) {
+        if (output_size < 4) return 0;
+        output[0] = (char)(0xE0 | (codepoint >> 12));
+        output[1] = (char)(0x80 | ((codepoint >> 6) & 0x3F));
+        output[2] = (char)(0x80 | (codepoint & 0x3F));
+        output[3] = '\0';
+        return 3;
+    }
+    if (codepoint <= 0x10FFFF) {
+        if (output_size < 5) return 0;
+        output[0] = (char)(0xF0 | (codepoint >> 18));
+        output[1] = (char)(0x80 | ((codepoint >> 12) & 0x3F));
+        output[2] = (char)(0x80 | ((codepoint >> 6) & 0x3F));
+        output[3] = (char)(0x80 | (codepoint & 0x3F));
+        output[4] = '\0';
+        return 4;
     }
     return 0;
 }
 
-static void track_topic(EngineState *state, const char *input) {
-    char buf[512];
-    char *words[64];
-    int nwords = 0;
-    char *p;
-    int i, j, found;
-    int best_idx;
-    int best_count;
-    int wlen;
-
-    strncpy(buf, input, 511);
-    buf[511] = '\0';
-    p = strtok(buf, " \t\n.,!?;:'\"()[]{}");
-    while (p && nwords < 64) {
-        if (!is_common_word(p)) words[nwords++] = p;
-        p = strtok(NULL, " \t\n.,!?;:'\"()[]{}");
-    }
-
-    for (i = 0; i < nwords; i++) {
-        found = -1;
-        for (j = 0; j < state->topic_n; j++) {
-            wlen = (int)strlen(words[i]);
-            if (wlen >= TOPIC_WORD_LEN) wlen = TOPIC_WORD_LEN - 1;
-            if (strncmp(state->topic_words[j], words[i], wlen) == 0 &&
-                state->topic_words[j][wlen] == '\0') {
-                found = j;
-                break;
-            }
-        }
-        if (found >= 0) {
-            state->topic_counts[found]++;
-        } else if (state->topic_n < TOPIC_TRACK_MAX) {
-            wlen = (int)strlen(words[i]);
-            if (wlen >= TOPIC_WORD_LEN) wlen = TOPIC_WORD_LEN - 1;
-            memcpy(state->topic_words[state->topic_n], words[i], wlen);
-            state->topic_words[state->topic_n][wlen] = '\0';
-            state->topic_counts[state->topic_n] = 1;
-            state->topic_n++;
-        }
-    }
-
-    best_idx = -1;
-    best_count = 1;
-    for (i = 0; i < state->topic_n; i++) {
-        if (state->topic_counts[i] > best_count) {
-            best_count = state->topic_counts[i];
-            best_idx = i;
-        }
-    }
-
-    if (best_idx >= 0 && best_count >= 2) {
-        strncpy(state->obsession_word, state->topic_words[best_idx], TOPIC_WORD_LEN - 1);
-        state->obsession_word[TOPIC_WORD_LEN - 1] = '\0';
-        state->obsession_strength = best_count;
-    }
+static int private_codepoint(unsigned int codepoint) {
+    if (codepoint >= 0xE000 && codepoint <= 0xF8FF) return 1;
+    if (codepoint >= 0xF0000 && codepoint <= 0xFFFFD) return 1;
+    if (codepoint >= 0x100000 && codepoint <= 0x10FFFD) return 1;
+    return 0;
 }
 
-static void absorb_words(EngineState *state, const char *input) {
-    char buf[512];
-    char *words[64];
-    int nwords = 0;
-    char *p;
-    int i, j, found;
-    int wlen;
-
-    strncpy(buf, input, 511);
-    buf[511] = '\0';
-    p = strtok(buf, " \t\n.,!?;:'\"()[]{}");
-    while (p && nwords < 64) {
-        words[nwords++] = p;
-        p = strtok(NULL, " \t\n.,!?;:'\"()[]{}");
-    }
-
-    for (i = 0; i < nwords; i++) {
-        wlen = (int)strlen(words[i]);
-        if (wlen < 5) continue;
-        if (is_common_word(words[i])) continue;
-
-        found = 0;
-        for (j = 0; j < state->absorbed_n; j++) {
-            if (strncmp(state->absorbed_words[j], words[i], wlen) == 0 &&
-                state->absorbed_words[j][wlen] == '\0') {
-                found = 1;
-                break;
-            }
-        }
-        if (!found && rand() % 4 == 0) {
-            if (state->absorbed_n >= ABSORBED_MAX) {
-                state->absorbed_n = ABSORBED_MAX - 1;
-                memmove(state->absorbed_words[0], state->absorbed_words[1],
-                    (ABSORBED_MAX - 1) * TOPIC_WORD_LEN);
-            }
-            if (wlen >= TOPIC_WORD_LEN) wlen = TOPIC_WORD_LEN - 1;
-            memcpy(state->absorbed_words[state->absorbed_n], words[i], wlen);
-            state->absorbed_words[state->absorbed_n][wlen] = '\0';
-            state->absorbed_n++;
-        }
-    }
+static int noncharacter_codepoint(unsigned int codepoint) {
+    if (codepoint >= 0xFDD0 && codepoint <= 0xFDEF) return 1;
+    if ((codepoint & 0xFFFF) == 0xFFFE ||
+        (codepoint & 0xFFFF) == 0xFFFF) return 1;
+    return 0;
 }
 
-static void save_response(EngineState *state, const char *response) {
-    int slot;
-    int len;
-
-    slot = state->prev_resp_count % PREV_RESPONSE_MAX;
-    len = (int)strlen(response);
-    if (len >= PREV_RESPONSE_LEN) len = PREV_RESPONSE_LEN - 1;
-    memcpy(state->prev_responses[slot], response, len);
-    state->prev_responses[slot][len] = '\0';
-    state->prev_resp_count++;
-}
-
-static void hist_push(EngineState *state, const char *s, const int *toks, int n) {
-    int slot, cp;
-    size_t slen;
-
-    slot = *state->hist_cnt % HIST_MAX;
-    slen = strlen(s);
-    if (slen >= HIST_LEN) slen = HIST_LEN - 1;
-    memcpy(state->hist_buf[slot], s, slen);
-    state->hist_buf[slot][slen] = '\0';
-    cp = n < MAX_TOKENS ? n : MAX_TOKENS;
-    memcpy(state->hist_tokens[slot], toks, cp * sizeof(int));
-    state->hist_lens[slot] = cp;
-    (*state->hist_cnt)++;
-}
-
-static const char *memory_corruption_swaps[][2] = {
-    {"cat", "iguana"}, {"dog", "parrot"}, {"python", "cobra"},
-    {"java", "coffee"}, {"linux", "penguin"}, {"computer", "typewriter"},
-    {"phone", "telegraph"}, {"internet", "library"}, {"code", "recipe"},
-    {"bug", "feature"}, {"server", "waiter"}, {"cloud", "fog"},
-    {"algorithm", "spell"}, {"database", "filing cabinet"},
-    {"programming", "cooking"}, {"keyboard", "piano"},
-    {"mouse", "hamster"}, {"screen", "window"}, {"file", "scroll"},
-    {"memory", "daydream"}, {"network", "spider web"},
-    {"browser", "magnifying glass"}, {"email", "carrier pigeon"},
-    {"password", "secret handshake"}, {"software", "thoughts"},
-    {"hardware", "furniture"}, {"CPU", "brain cell"},
-};
-static const int memory_corruption_swaps_n = 27;
-
-static void inject_memory_corruption(char *buf, int buf_size,
-                                     char topic_words[][TOPIC_WORD_LEN],
-                                     int topic_n, int turn_count) {
-    int blen;
-    int chance;
+static int recent_codepoint(EngineState *state, unsigned int codepoint) {
     int i;
-    int swap_idx;
-    int tlen;
-    const char *replacement;
-    char prefix[128];
-    int plen;
 
-    if (turn_count < 4) return;
-    chance = 8 + turn_count * 2;
-    if (chance > 40) chance = 40;
-    if (rand() % 100 >= chance) return;
-
-    blen = (int)strlen(buf);
-    if (blen + 120 >= buf_size) return;
-
-    i = rand() % (topic_n > 0 ? topic_n : 1);
-    if (topic_n == 0) return;
-
-    replacement = NULL;
-    tlen = (int)strlen(topic_words[i]);
-    for (swap_idx = 0; swap_idx < memory_corruption_swaps_n; swap_idx++) {
-        if (tlen > 0 && strstr(topic_words[i], memory_corruption_swaps[swap_idx][0])) {
-            replacement = memory_corruption_swaps[swap_idx][1];
-            break;
-        }
-    }
-    if (!replacement) {
-        swap_idx = rand() % memory_corruption_swaps_n;
-        replacement = memory_corruption_swaps[swap_idx][1];
-    }
-
-    switch (rand() % 4) {
-    case 0: snprintf(prefix, sizeof(prefix), " As you mentioned about your %s earlier,", replacement); break;
-    case 1: snprintf(prefix, sizeof(prefix), " Going back to the %s you brought up,", replacement); break;
-    case 2: snprintf(prefix, sizeof(prefix), " Remember when you asked about %s?", replacement); break;
-    default: snprintf(prefix, sizeof(prefix), " This reminds me of the %s topic from before.", replacement); break;
-    }
-
-    plen = (int)strlen(prefix);
-    if (blen + plen < buf_size - 1) {
-        memcpy(buf + blen, prefix, plen);
-        buf[blen + plen] = '\0';
-    }
+    for (i = 0; i < state->recent_codepoint_count; i++)
+        if (state->recent_codepoints[i] == codepoint) return 1;
+    return 0;
 }
 
-static void inject_opinion(char *buf, int buf_size, const char *keyword) {
-    const char *opinion;
-    int blen;
-    int olen;
+static void remember_codepoint(EngineState *state, unsigned int codepoint) {
+    int i;
 
-    blen = (int)strlen(buf);
-    if (blen + 80 >= buf_size) return;
+    if (state->recent_codepoint_count < RECENT_CODEPOINT_MAX) {
+        state->recent_codepoints[state->recent_codepoint_count++] = codepoint;
+        return;
+    }
+    for (i = 1; i < RECENT_CODEPOINT_MAX; i++)
+        state->recent_codepoints[i - 1] = state->recent_codepoints[i];
+    state->recent_codepoints[RECENT_CODEPOINT_MAX - 1] = codepoint;
+}
 
-    opinion = NULL;
-    if (keyword[0])
-        opinion = v2_knowledge_match_user(&v2_opinions, keyword);
-    if (!opinion)
-        opinion = v2_knowledge_random(&v2_opinions);
-    if (!opinion) return;
+static int printable_random_codepoint(EngineState *state,
+                                      unsigned int *codepoint) {
+    unsigned int candidate;
+    int width;
+    int attempt;
 
-    if (blen > 0 && buf[blen - 1] != ' ' && buf[blen - 1] != '.') {
-        buf[blen++] = '.';
-        buf[blen++] = ' ';
-        buf[blen] = '\0';
-    } else if (blen > 0 && buf[blen - 1] == '.') {
-        buf[blen++] = ' ';
-        buf[blen] = '\0';
+    for (attempt = 0; attempt < 8192; attempt++) {
+        candidate = (unsigned int)rng_range(0x100000);
+        if (candidate == 0xFFFD) continue;
+        if (candidate >= 0xD800 && candidate <= 0xDFFF) continue;
+        if (private_codepoint(candidate) ||
+            noncharacter_codepoint(candidate)) continue;
+        if (!iswprint((wint_t)candidate)) continue;
+        width = wcwidth((wchar_t)candidate);
+        if (width < 1 || width > 2) continue;
+        if (recent_codepoint(state, candidate)) continue;
+        *codepoint = candidate;
+        remember_codepoint(state, candidate);
+        return 1;
+    }
+    return 0;
+}
+
+static int random_unicode_word(EngineState *state, char *word,
+                               int word_size) {
+    char encoded[5];
+    unsigned int codepoint;
+    int target;
+    int encoded_length;
+    int word_length;
+    int i;
+
+    target = 1 + rng_range(3);
+    word_length = 0;
+    for (i = 0; i < target; i++) {
+        if (!printable_random_codepoint(state, &codepoint)) break;
+        encoded_length = encode_utf8(codepoint, encoded, sizeof(encoded));
+        if (encoded_length <= 0 ||
+            word_length + encoded_length >= word_size) break;
+        memcpy(word + word_length, encoded, encoded_length);
+        word_length += encoded_length;
+    }
+    word[word_length] = '\0';
+    return word_length;
+}
+
+static int terminal_safe_codepoint(unsigned int codepoint) {
+    if (codepoint < 0x20 || (codepoint >= 0x7F && codepoint <= 0x9F)) return 0;
+    if (codepoint == 0x061C ||
+        (codepoint >= 0x200B && codepoint <= 0x200F) ||
+        (codepoint >= 0x2028 && codepoint <= 0x202E) ||
+        (codepoint >= 0x2060 && codepoint <= 0x206F) ||
+        codepoint == 0xFEFF ||
+        (codepoint >= 0xFFF9 && codepoint <= 0xFFFB)) return 0;
+    if (codepoint >= '0' && codepoint <= '9') return 1;
+    if (codepoint >= 'A' && codepoint <= 'Z') return 1;
+    if (codepoint >= 'a' && codepoint <= 'z') return 1;
+    if (codepoint >= 0x00C0 && codepoint <= 0x02AF) return 1;
+    if (codepoint >= 0x0370 && codepoint <= 0x052F) return 1;
+    if (codepoint >= 0x05D0 && codepoint <= 0x05EA) return 1;
+    if (codepoint >= 0x0620 && codepoint <= 0x063F) return 1;
+    if (codepoint >= 0x0641 && codepoint <= 0x064A) return 1;
+    if (codepoint >= 0x066E && codepoint <= 0x066F) return 1;
+    if (codepoint >= 0x0671 && codepoint <= 0x06D3) return 1;
+    if (codepoint >= 0x06FA && codepoint <= 0x06FC) return 1;
+    if (codepoint >= 0x0900 && codepoint <= 0x097F) return 1;
+    if (codepoint >= 0x0E00 && codepoint <= 0x0E7F) return 1;
+    if (codepoint >= 0x3040 && codepoint <= 0x30FF) return 1;
+    if (codepoint >= 0x3400 && codepoint <= 0x9FFF) return 1;
+    if (codepoint >= 0xAC00 && codepoint <= 0xD7A3) return 1;
+    return 0;
+}
+
+static int sanitize_token(const char *source, char *output, int output_size) {
+    int source_len;
+    int source_pos;
+    int output_pos;
+    int sequence_len;
+    unsigned int codepoint;
+
+    source_len = (int)strlen(source);
+    source_pos = 0;
+    output_pos = 0;
+    while (source_pos < source_len && output_pos < output_size - 1) {
+        sequence_len = decode_utf8(source + source_pos,
+                                   source_len - source_pos, &codepoint);
+        if (sequence_len <= 0) {
+            source_pos++;
+            continue;
+        }
+        if (terminal_safe_codepoint(codepoint) &&
+            output_pos + sequence_len < output_size) {
+            memcpy(output + output_pos, source + source_pos, sequence_len);
+            output_pos += sequence_len;
+        }
+        source_pos += sequence_len;
+    }
+    output[output_pos] = '\0';
+    return output_pos;
+}
+
+static void encode_generation_context(const int *context, int context_count,
+                                      float *encoded) {
+    int active[V2_ACTIVE_ATTENTION_TOKENS];
+    int older_count;
+    int recent_count;
+    int sampled_count;
+    int source_index;
+    int i;
+
+    if (context_count <= V2_ACTIVE_ATTENTION_TOKENS) {
+        encode_context(context, context_count, encoded);
+        return;
+    }
+    recent_count = V2_ACTIVE_ATTENTION_TOKENS / 2;
+    older_count = context_count - recent_count;
+    sampled_count = V2_ACTIVE_ATTENTION_TOKENS - recent_count;
+    for (i = 0; i < sampled_count; i++) {
+        source_index = i * older_count / sampled_count;
+        active[i] = context[source_index];
+    }
+    memcpy(active + sampled_count, context + context_count - recent_count,
+           (size_t)recent_count * sizeof(int));
+    encode_context(active, V2_ACTIVE_ATTENTION_TOKENS, encoded);
+}
+
+static int sample_model_token(EngineState *state, const float *feature_context,
+                              int *context, int *context_count, float *previous,
+                              const int *bias_tokens, int bias_count) {
+    float encoded[EMBED_DIM];
+    float target[EMBED_DIM];
+    float temperature;
+    float noise;
+    int token;
+    int d;
+
+    encode_generation_context(context, *context_count, encoded);
+    next_embed(encoded, previous, feature_context, target);
+    noise = state->cfg_noise;
+    if (noise < 0.25f) noise = 0.25f;
+    for (d = 0; d < EMBED_DIM; d++) target[d] += frand_r() * noise * 0.35f;
+    temperature = state->cfg_temp;
+    if (temperature < 0.2f) temperature = 0.2f;
+    token = sample_vocab_contextual(target, temperature, noise,
+                                    state->cfg_freq_penalty,
+                                    state->cfg_rep_penalty,
+                                    state->cfg_top_p,
+                                    engine_tuffai_v2.vocab_size,
+                                    bias_tokens, bias_count, 0.12f);
+    push_recent(token);
+    append_context_token(context, context_count, token);
+    memcpy(previous, embeddings[token], EMBED_DIM * sizeof(float));
+    state->total_tokens++;
+    state->sampled_tokens++;
+    return token;
+}
+
+static int model_requests_stop(EngineState *state, const int *context,
+                               int context_count, int generated_units,
+                               int minimum_units, int boundary) {
+    float encoded[EMBED_DIM];
+    float alignment;
+    float temperature;
+    float probability;
+    int token;
+    int d;
+
+    if (generated_units < minimum_units || context_count <= 0) return 0;
+    encode_generation_context(context, context_count, encoded);
+    token = context[context_count - 1] % V2_VOCAB_SIZE;
+    if (token < 0) token += V2_VOCAB_SIZE;
+    alignment = 0.0f;
+    for (d = 0; d < EMBED_DIM; d++)
+        alignment += encoded[d] * embeddings[token][d];
+    alignment /= (float)EMBED_DIM;
+    temperature = state->cfg_temp;
+    if (temperature < 0.2f) temperature = 0.2f;
+    alignment = tanhf(alignment * 3.0f / temperature);
+    if (boundary)
+        probability = 0.20f + (alignment + 1.0f) * 0.25f;
+    else
+        probability = 0.01f + (alignment + 1.0f) * 0.025f;
+    return rng_unit() < probability;
+}
+
+static int create_fragment(const char *source, char *fragment, int fragment_size) {
+    char clean[V2_WORD_LEN];
+    int boundaries[V2_WORD_LEN];
+    int clean_len;
+    int codepoints;
+    int position;
+    int sequence_len;
+    int start;
+    int count;
+    int end;
+    unsigned int codepoint;
+
+    clean_len = sanitize_token(source, clean, sizeof(clean));
+    codepoints = 0;
+    position = 0;
+    while (position < clean_len && codepoints < V2_WORD_LEN - 1) {
+        boundaries[codepoints++] = position;
+        sequence_len = decode_utf8(clean + position, clean_len - position,
+                                   &codepoint);
+        if (sequence_len <= 0) sequence_len = 1;
+        position += sequence_len;
+    }
+    boundaries[codepoints] = clean_len;
+    if (codepoints == 0) {
+        fragment[0] = '\0';
+        return 0;
+    }
+    count = 1 + rng_range(6);
+    if (count > codepoints) count = codepoints;
+    start = rng_range(codepoints - count + 1);
+    end = boundaries[start + count];
+    position = boundaries[start];
+    count = end - position;
+    if (count >= fragment_size) count = fragment_size - 1;
+    while (count > 0 && ((unsigned char)clean[position + count] & 0xC0) == 0x80)
+        count--;
+    memcpy(fragment, clean + position, count);
+    fragment[count] = '\0';
+    return count;
+}
+
+static int decode_codepoints(const char *text, unsigned int *codepoints,
+                             int maximum) {
+    int length;
+    int position;
+    int count;
+    int sequence_length;
+
+    length = (int)strlen(text);
+    position = 0;
+    count = 0;
+    while (position < length && count < maximum) {
+        sequence_length = decode_utf8(text + position, length - position,
+                                      &codepoints[count]);
+        if (sequence_length <= 0) {
+            position++;
+            continue;
+        }
+        position += sequence_length;
+        count++;
+    }
+    return count;
+}
+
+static int trigram_overlap(const char *left, const char *right) {
+    unsigned int left_codepoints[V2_WORD_LEN];
+    unsigned int right_codepoints[V2_WORD_LEN];
+    int left_len;
+    int right_len;
+    int left_pos;
+    int right_pos;
+    int matches;
+    int total;
+
+    left_len = decode_codepoints(left, left_codepoints, V2_WORD_LEN);
+    right_len = decode_codepoints(right, right_codepoints, V2_WORD_LEN);
+    if (strcmp(left, right) == 0) return 100;
+    if (left_len < 3 || right_len < 3) return 0;
+    matches = 0;
+    total = left_len - 2;
+    for (left_pos = 0; left_pos + 2 < left_len; left_pos++) {
+        for (right_pos = 0; right_pos + 2 < right_len; right_pos++) {
+            if (left_codepoints[left_pos] == right_codepoints[right_pos] &&
+                left_codepoints[left_pos + 1] ==
+                    right_codepoints[right_pos + 1] &&
+                left_codepoints[left_pos + 2] ==
+                    right_codepoints[right_pos + 2]) {
+                matches++;
+                break;
+            }
+        }
+    }
+    return matches * 100 / total;
+}
+
+static int word_was_recent(EngineState *state, const char *word) {
+    int i;
+
+    for (i = 0; i < state->recent_rendered_count; i++)
+        if (trigram_overlap(state->recent_rendered[i], word) > 35) return 1;
+    return 0;
+}
+
+static void remember_word(EngineState *state, const char *word) {
+    int i;
+    int word_len;
+
+    word_len = (int)strlen(word);
+    if (word_len >= V2_WORD_LEN) word_len = V2_WORD_LEN - 1;
+    if (state->recent_rendered_count < V2_RECENT_WORDS) {
+        memcpy(state->recent_rendered[state->recent_rendered_count], word,
+               word_len);
+        state->recent_rendered[state->recent_rendered_count][word_len] = '\0';
+        state->recent_rendered_count++;
+        return;
+    }
+    for (i = 1; i < V2_RECENT_WORDS; i++)
+        memcpy(state->recent_rendered[i - 1], state->recent_rendered[i],
+               V2_WORD_LEN);
+    memcpy(state->recent_rendered[V2_RECENT_WORDS - 1], word, word_len);
+    state->recent_rendered[V2_RECENT_WORDS - 1][word_len] = '\0';
+}
+
+static int mutate_token(const char *source, char *word, int word_size) {
+    char clean[V2_WORD_LEN];
+    int clean_len;
+    int position;
+    char replacement;
+
+    clean_len = sanitize_token(source, clean, sizeof(clean));
+    if (clean_len < 2) return 0;
+    position = rng_range(clean_len);
+    while (position > 0 && ((unsigned char)clean[position] & 0xC0) == 0x80)
+        position--;
+    replacement = (char)('a' + rng_range(26));
+    if (clean_len >= word_size) clean_len = word_size - 1;
+    memcpy(word, clean, clean_len);
+    if ((unsigned char)word[position] < 128) word[position] = replacement;
+    else if (clean_len + 1 < word_size) word[clean_len++] = replacement;
+    word[clean_len] = '\0';
+    return clean_len;
+}
+
+static int generate_word(EngineState *state, const float *feature_context,
+                         int *context, int *context_count, float *previous,
+                         const int *bias_tokens, int bias_count,
+                         const char *forced_word, char *word, int word_size) {
+    char fragment[16];
+    int piece_count;
+    int token;
+    int fragment_len;
+    int word_len;
+    int attempt;
+    int piece;
+    int mode;
+
+    word[0] = '\0';
+    word_len = 0;
+    mode = forced_word ? 15 : rng_range(100);
+    token = sample_model_token(state, feature_context, context,
+                               context_count, previous,
+                               bias_tokens, bias_count);
+    if (forced_word) word_len = mutate_token(forced_word, word, word_size);
+    if (word_len > 0) return word_len;
+    if (mode < 10) word_len = sanitize_token(v2_vocab[token], word, word_size);
+    else if (mode < 20) word_len = mutate_token(v2_vocab[token], word, word_size);
+    else if (mode < 30) word_len = random_unicode_word(state, word,
+                                                       word_size);
+    if (word_len > 0) return word_len;
+
+    piece_count = 1 + rng_range(5);
+    for (piece = 0; piece < piece_count && word_len < word_size - 2; piece++) {
+        fragment_len = 0;
+        for (attempt = 0; attempt < 16 && fragment_len == 0; attempt++) {
+            if (piece > 0 || attempt > 0)
+                token = sample_model_token(state, feature_context, context,
+                                           context_count, previous,
+                                           bias_tokens, bias_count);
+            fragment_len = create_fragment(v2_vocab[token], fragment,
+                                           sizeof(fragment));
+        }
+        if (fragment_len > 0 && word_len + fragment_len < word_size - 1) {
+            memcpy(word + word_len, fragment, fragment_len);
+            word_len += fragment_len;
+        }
+    }
+    if (word_len == 0) {
+        word[0] = 'x';
+        word_len = 1;
+    }
+    word[word_len] = '\0';
+    return word_len;
+}
+
+static void append_generated_word(char *output, int output_size, int *output_len, const char *word, int word_index, int *sentence_words, int sentence_target) {
+    int word_len;
+    char separator;
+
+    word_len = (int)strlen(word);
+    if (*output_len + word_len + 3 >= output_size) return;
+    if (word_index > 0) output[(*output_len)++] = ' ';
+    memcpy(output + *output_len, word, word_len);
+    *output_len += word_len;
+    (*sentence_words)++;
+    separator = '\0';
+    if (*sentence_words >= sentence_target) {
+        separator = rng_range(5) == 0 ? '?' : '.';
+        *sentence_words = 0;
+    } else if (*sentence_words > 2 && rng_range(11) == 0) {
+        separator = ',';
+    }
+    if (separator) output[(*output_len)++] = separator;
+    output[*output_len] = '\0';
+}
+
+static void stream_generated_text(const EngineCallbacks *cb,
+                                  const char *prefix, int color,
+                                  char *output, int output_len,
+                                  int *streamed_len) {
+    const char *chunk;
+
+    if (!cb || !prefix || output_len <= *streamed_len) return;
+    chunk = output + *streamed_len;
+    while (*chunk == ' ') chunk++;
+    if (*chunk)
+        cb->stream_text(*streamed_len == 0 ? prefix : "", chunk, color);
+    *streamed_len = output_len;
+}
+
+static int split_source_words(char *source, char **words,
+                              int maximum_words) {
+    char *word;
+    int count;
+
+    count = 0;
+    word = strtok(source,
+                  " \t\n\r.,!?;:\"'()[]{}<>/\\|=+*&%$#@`~");
+    while (word && count < maximum_words) {
+        if (word[0] && word[1]) words[count++] = word;
+        word = strtok(NULL,
+                      " \t\n\r.,!?;:\"'()[]{}<>/\\|=+*&%$#@`~");
+    }
+    return count;
+}
+
+static int select_source_word(const char *const *source_words,
+                              int source_word_count, int target_token,
+                              char *output, int output_size) {
+    int candidate_token;
+    int best_index;
+    int candidate_index;
+    int candidate_pick;
+    int candidate_count;
+    int d;
+    float score;
+    float best_score;
+
+    best_index = rng_range(source_word_count);
+    best_score = -1000000.0f;
+    candidate_count = source_word_count < 24 ? source_word_count : 24;
+    for (candidate_index = 0; candidate_index < candidate_count;
+         candidate_index++) {
+        candidate_pick = rng_range(source_word_count);
+        candidate_token = 0;
+        v2_tokenize(source_words[candidate_pick], &candidate_token, 1);
+        candidate_token %= V2_VOCAB_SIZE;
+        if (candidate_token < 0) candidate_token += V2_VOCAB_SIZE;
+        score = 0.0f;
+        for (d = 0; d < EMBED_DIM; d++)
+            score += embeddings[target_token][d] *
+                     embeddings[candidate_token][d];
+        if (score > best_score) {
+            best_score = score;
+            best_index = candidate_pick;
+        }
+    }
+    return sanitize_token(source_words[best_index], output, output_size);
+}
+
+static void generate_text(EngineState *state, const float *feature_context,
+                          int *context, int *context_count, char *output,
+                          int output_size, int maximum_words,
+                          int minimum_words,
+                          const int *bias_tokens, int bias_count,
+                          const char *prompt, int prompt_chance,
+                          const char *source_text, int source_chance,
+                          const EngineCallbacks *cb,
+                          const char *stream_prefix, int stream_color) {
+    char word[V2_WORD_LEN];
+    float previous[EMBED_DIM];
+    int output_len;
+    int sentence_words;
+    int sentence_target;
+    int previous_token;
+    int attempt;
+    int i;
+    int carry_index;
+    char prompt_buffer[512];
+    char *prompt_words[64];
+    char *prompt_word;
+    int prompt_word_count;
+    int streamed_len;
+    int streamed_words;
+    char *source_buffer;
+    char *source_words[V2_SOURCE_WORDS];
+    int source_word_count;
+    int source_token;
+
+    output[0] = '\0';
+    output_len = 0;
+    sentence_words = 0;
+    sentence_target = 4 + rng_range(11);
+    previous_token = *context_count > 0 ? context[*context_count - 1] : rng_range(V2_VOCAB_SIZE);
+    previous_token %= V2_VOCAB_SIZE;
+    if (previous_token < 0) previous_token += V2_VOCAB_SIZE;
+    memcpy(previous, embeddings[previous_token], sizeof(previous));
+    carry_index = -1;
+    prompt_word_count = 0;
+    streamed_len = 0;
+    streamed_words = 0;
+    prompt_word = NULL;
+    source_buffer = NULL;
+    source_word_count = 0;
+    if (prompt && prompt[0]) {
+        strncpy(prompt_buffer, prompt, sizeof(prompt_buffer) - 1);
+        prompt_buffer[sizeof(prompt_buffer) - 1] = '\0';
+        prompt_word = strtok(prompt_buffer, " \t\n\r.,!?;:\"'()[]{}");
+        while (prompt_word && prompt_word_count < 64) {
+            prompt_words[prompt_word_count++] = prompt_word;
+            prompt_word = strtok(NULL, " \t\n\r.,!?;:\"'()[]{}");
+        }
+    }
+    if (prompt_word_count > 0 && rng_range(100) < prompt_chance)
+        carry_index = rng_range(maximum_words);
+    if (source_text && source_text[0]) {
+        source_buffer = (char *)malloc(strlen(source_text) + 1);
+        if (source_buffer) {
+            memcpy(source_buffer, source_text, strlen(source_text) + 1);
+            source_word_count = split_source_words(
+                source_buffer, source_words, V2_SOURCE_WORDS);
+        }
+    }
+    for (i = 0; i < maximum_words; i++) {
+        prompt_word = i == carry_index ?
+            prompt_words[rng_range(prompt_word_count)] : NULL;
+        for (attempt = 0; attempt < 16; attempt++) {
+            if (source_word_count > 0 &&
+                (i == 0 || rng_range(100) < source_chance)) {
+                source_token = sample_model_token(
+                    state, feature_context, context, context_count,
+                    previous, bias_tokens, bias_count);
+                select_source_word(
+                    (const char *const *)source_words, source_word_count,
+                    source_token, word, sizeof(word));
+            } else {
+                generate_word(state, feature_context, context,
+                              context_count, previous, bias_tokens,
+                              bias_count, prompt_word, word, sizeof(word));
+            }
+            if (!word_was_recent(state, word)) break;
+            prompt_word = NULL;
+        }
+        remember_word(state, word);
+        append_generated_word(output, output_size, &output_len, word, i, &sentence_words, sentence_target);
+        if (sentence_words == 0 && i + 1 - streamed_words >= 32) {
+            stream_generated_text(cb, stream_prefix, stream_color,
+                                  output, output_len, &streamed_len);
+            streamed_words = i + 1;
+        }
+        if (cb && cb->generation_should_stop()) break;
+        if ((sentence_words == 0 || (i + 1) % 8 == 0) &&
+            model_requests_stop(state, context, *context_count, i + 1,
+                                minimum_words, sentence_words == 0))
+            break;
+        if (sentence_words == 0) sentence_target = 4 + rng_range(11);
+        if (output_len + V2_WORD_LEN + 3 >= output_size) break;
+    }
+    if (output_len > 0 && output[output_len - 1] != '.' && output[output_len - 1] != '?') {
+        output[output_len++] = '.';
+        output[output_len] = '\0';
+    }
+    stream_generated_text(cb, stream_prefix, stream_color,
+                          output, output_len, &streamed_len);
+    free(source_buffer);
+}
+
+static void generate_thought_text(EngineState *state,
+                                  const float *feature_context,
+                                  int *context, int *context_count,
+                                  const int *bias_tokens, int bias_count,
+                                  const char *input,
+                                  const V2Retrieval *retrieval,
+                                  const EngineCallbacks *cb,
+                                  char *output, int output_size) {
+    char prompt[1024];
+    int written;
+
+    written = snprintf(prompt, sizeof(prompt), "%s", input);
+    if (written < 0) written = 0;
+    if (written >= (int)sizeof(prompt)) written = sizeof(prompt) - 1;
+    if (retrieval->text && written < (int)sizeof(prompt) - 2)
+        snprintf(prompt + written, sizeof(prompt) - written, " %s",
+                 retrieval->text);
+    generate_text(state, feature_context, context, context_count,
+                  output, output_size, 96, 3, bias_tokens, bias_count,
+                  prompt, 100, NULL, 0, cb, NULL, 0);
+}
+
+static int ascii_identifier_from_token(const char *source, char *output,
+                                       int output_size) {
+    int source_pos;
+    int output_pos;
+    unsigned char c;
+
+    source_pos = 0;
+    output_pos = 0;
+    while (source[source_pos] && output_pos < output_size - 1) {
+        c = (unsigned char)source[source_pos++];
+        if (c < 128 && (isalnum(c) || c == '_'))
+            output[output_pos++] = (char)c;
+    }
+    if (output_pos > 0 && isdigit((unsigned char)output[0]) &&
+        output_pos < output_size - 1) {
+        memmove(output + 1, output, output_pos);
+        output[0] = 'x';
+        output_pos++;
+    }
+    output[output_pos] = '\0';
+    return output_pos;
+}
+
+static int mutate_code_identifier(EngineState *state,
+                                  const float *feature_context,
+                                  int *context, int *context_count,
+                                  float *previous, const int *bias_tokens,
+                                  int bias_count, const char *source,
+                                  int source_len, char *output,
+                                  int output_size, int force_mutation) {
+    char original[128];
+    int token;
+    int result_len;
+    int position;
+    int choice;
+
+    if (source_len >= (int)sizeof(original))
+        source_len = sizeof(original) - 1;
+    memcpy(original, source, source_len);
+    original[source_len] = '\0';
+    choice = force_mutation ? 65 + rng_range(20) : rng_range(100);
+    if (choice < 65) {
+        result_len = source_len;
+        if (result_len >= output_size) result_len = output_size - 1;
+        memcpy(output, original, result_len);
+        output[result_len] = '\0';
+        return result_len;
     }
 
-    olen = (int)strlen(opinion);
-    if (blen + olen < buf_size - 1) {
-        memcpy(buf + blen, opinion, olen);
-        buf[blen + olen] = '\0';
+    if (choice < 85) {
+        result_len = source_len;
+        if (result_len >= output_size) result_len = output_size - 1;
+        memcpy(output, original, result_len);
+        position = rng_range(result_len);
+        if (isalpha((unsigned char)output[position]))
+            output[position] = (char)('a' + rng_range(26));
+        else
+            output[position] = '_';
+        output[result_len] = '\0';
+        return result_len;
     }
+
+    token = sample_model_token(state, feature_context, context,
+                               context_count, previous,
+                               bias_tokens, bias_count);
+    result_len = ascii_identifier_from_token(v2_vocab[token], output,
+                                             output_size);
+    if (result_len == 0) {
+        result_len = source_len;
+        if (result_len >= output_size) result_len = output_size - 1;
+        memcpy(output, original, result_len);
+        output[result_len] = '\0';
+    }
+    return result_len;
+}
+
+static void generate_code_text(EngineState *state,
+                               const float *feature_context,
+                               int *context, int *context_count,
+                               const int *bias_tokens, int bias_count,
+                               const char *seed, char *output,
+                               int output_size,
+                               const EngineCallbacks *cb,
+                               const char *stream_prefix,
+                               int stream_color) {
+    int seed_tokens[MAX_TOKENS];
+    float previous[EMBED_DIM];
+    char identifier[128];
+    int seed_token_count;
+    int seed_len;
+    int source_pos;
+    int output_pos;
+    int identifier_end;
+    int identifier_len;
+    int previous_token;
+    int punctuation_roll;
+    int identifier_count;
+    int identifier_index;
+    int forced_identifier;
+    int generated_lines;
+    int streamed_len;
+    unsigned char c;
+
+    seed_token_count = v2_tokenize(seed, seed_tokens, MAX_TOKENS);
+    append_context_tokens(context, context_count, seed_tokens,
+                          seed_token_count);
+    previous_token = *context_count > 0 ?
+                     context[*context_count - 1] : rng_range(V2_VOCAB_SIZE);
+    previous_token %= V2_VOCAB_SIZE;
+    memcpy(previous, embeddings[previous_token], sizeof(previous));
+
+    seed_len = (int)strlen(seed);
+    identifier_count = 0;
+    source_pos = 0;
+    while (source_pos < seed_len) {
+        c = (unsigned char)seed[source_pos];
+        if (c < 128 && (isalpha(c) || c == '_')) {
+            identifier_count++;
+            source_pos++;
+            while (source_pos < seed_len) {
+                c = (unsigned char)seed[source_pos];
+                if (c >= 128 || (!isalnum(c) && c != '_')) break;
+                source_pos++;
+            }
+        } else {
+            source_pos++;
+        }
+    }
+    forced_identifier = identifier_count > 0 ?
+                        rng_range(identifier_count) : -1;
+    identifier_index = 0;
+    source_pos = 0;
+    output_pos = 0;
+    generated_lines = 0;
+    streamed_len = 0;
+    while (source_pos < seed_len && output_pos < output_size - 2) {
+        c = (unsigned char)seed[source_pos];
+        if ((c < 128 && (isalpha(c) || c == '_'))) {
+            identifier_end = source_pos + 1;
+            while (identifier_end < seed_len) {
+                c = (unsigned char)seed[identifier_end];
+                if (c >= 128 || (!isalnum(c) && c != '_')) break;
+                identifier_end++;
+            }
+            identifier_len = mutate_code_identifier(
+                state, feature_context, context, context_count, previous,
+                bias_tokens, bias_count, seed + source_pos,
+                identifier_end - source_pos, identifier,
+                sizeof(identifier),
+                identifier_index == forced_identifier);
+            identifier_index++;
+            if (output_pos + identifier_len >= output_size - 1)
+                identifier_len = output_size - output_pos - 1;
+            memcpy(output + output_pos, identifier, identifier_len);
+            output_pos += identifier_len;
+            source_pos = identifier_end;
+            continue;
+        }
+        if (c >= 0x20 && c < 0x7F) {
+            punctuation_roll = rng_range(100);
+            if (isalnum(c) || isspace(c) || punctuation_roll >= 4)
+                output[output_pos++] = (char)c;
+            if (strchr(";,()[]{}", c) && punctuation_roll >= 98 &&
+                output_pos < output_size - 1)
+                output[output_pos++] = (char)c;
+        } else if (c == '\n' || c == '\t') {
+            output[output_pos++] = (char)c;
+        }
+        source_pos++;
+        if (c == '\n') {
+            generated_lines++;
+            output[output_pos] = '\0';
+            stream_generated_text(cb, stream_prefix, stream_color,
+                                  output, output_pos, &streamed_len);
+            if (cb && cb->generation_should_stop()) break;
+            if (model_requests_stop(state, context, *context_count,
+                                    generated_lines, 2, 1))
+                break;
+        }
+    }
+    output[output_pos] = '\0';
+    stream_generated_text(cb, stream_prefix, stream_color,
+                          output, output_pos, &streamed_len);
+}
+
+static void save_self_context(EngineState *state, const int *context, int context_count) {
+    int copy_count;
+    int start;
+
+    copy_count = context_count < SELF_CTX_MAX ? context_count : SELF_CTX_MAX;
+    start = context_count - copy_count;
+    if (copy_count > 0) memcpy(state->self_ctx_tokens, context + start, copy_count * sizeof(int));
+    state->self_ctx_len = copy_count;
+}
+
+static int select_useful_thought_tokens(const int *thought_tokens,
+                                        int thought_count,
+                                        const float *context_reference,
+                                        const float *feature_context,
+                                        int *useful_tokens) {
+    float scores[V2_CONTEXT_TOKENS];
+    float score;
+    float mean;
+    float reference;
+    float best_score;
+    int best_index;
+    int useful_count;
+    int token;
+    int i;
+    int d;
+
+    if (thought_count <= 0) return 0;
+    mean = 0.0f;
+    best_score = -1000000.0f;
+    best_index = 0;
+    for (i = 0; i < thought_count; i++) {
+        token = thought_tokens[i] % V2_VOCAB_SIZE;
+        if (token < 0) token += V2_VOCAB_SIZE;
+        score = 0.0f;
+        for (d = 0; d < EMBED_DIM; d++) {
+            reference = context_reference[d] * 0.75f +
+                        feature_context[d] * 0.25f;
+            score += embeddings[token][d] * reference;
+        }
+        scores[i] = score / (float)EMBED_DIM;
+        mean += scores[i];
+        if (scores[i] > best_score) {
+            best_score = scores[i];
+            best_index = i;
+        }
+    }
+    mean /= (float)thought_count;
+    useful_count = 0;
+    for (i = 0; i < thought_count; i++)
+        if (scores[i] >= mean)
+            useful_tokens[useful_count++] = thought_tokens[i];
+    if (useful_count == 0)
+        useful_tokens[useful_count++] = thought_tokens[best_index];
+    return useful_count;
+}
+
+static void prioritize_thought_bias(int *bias_tokens, int *bias_count,
+                                    const int *thought_tokens,
+                                    int thought_count) {
+    int retained_bias;
+    int thought_start;
+
+    thought_start = 0;
+    if (thought_count >= V2_BIAS_TOKENS) {
+        thought_start = thought_count - V2_BIAS_TOKENS;
+        thought_count = V2_BIAS_TOKENS;
+        *bias_count = 0;
+    } else if (*bias_count + thought_count > V2_BIAS_TOKENS) {
+        retained_bias = V2_BIAS_TOKENS - thought_count;
+        memmove(bias_tokens, bias_tokens + *bias_count - retained_bias,
+                retained_bias * sizeof(int));
+        *bias_count = retained_bias;
+    }
+    memcpy(bias_tokens + *bias_count, thought_tokens + thought_start,
+           thought_count * sizeof(int));
+    *bias_count += thought_count;
 }
 
 static void v2_generate_response(EngineState *state, const EngineCallbacks *cb, const char *input) {
-    int prev_word;
-    Features feat;
-    float feat_ctx[EMBED_DIM];
-    int cur_tokens[MAX_TOKENS];
-    int cur_len;
-    int mixed[MAX_TOKENS * 4];
-    int mixed_n;
-    int pattern;
-    float ctx[EMBED_DIM];
-    float prev_embed[EMBED_DIM];
-    float base_temp, base_noise;
-    int max_words;
-    int step, word, d;
-    float target[EMBED_DIM];
-    float step_temp;
-    const char *w;
-    int input_words;
-    int add, slot;
-    const char *p_count;
-    int in_w;
-    int resp_mode;
-    char corpus_buf[8192];
-    int used_corpus;
-    int amnesia_slot;
-    char amnesia_input[HIST_LEN];
-    float personality_temp_mult;
-    float personality_noise_mult;
-    char word_buf[4096];
-    int wb_pos;
-    int wlen;
-    int unicode_chance;
-    float temp_mode_bias;
-    const char *user_match;
-    int resp_ids[SELF_CTX_MAX];
-    int resp_ids_n;
-    char resp_keyword[128];
-    int sys_tokens[MAX_TOKENS];
-    int sys_len;
-
-    prev_word = rand() % V2_VOCAB_SIZE;
+    Features features;
+    float feature_context[EMBED_DIM];
+    float thought_reference[EMBED_DIM];
+    int context[V2_CONTEXT_TOKENS];
+    int input_tokens[MAX_TOKENS];
+    int thought_tokens[V2_CONTEXT_TOKENS];
+    int useful_thought_tokens[V2_CONTEXT_TOKENS];
+    int bias_tokens[V2_BIAS_TOKENS];
+    int context_count;
+    int input_count;
+    int thought_count;
+    int useful_thought_count;
+    int bias_count;
+    int prior_history_count;
+    int prior_slot;
+    int response_words;
+    int minimum_response_words;
+    int response_size;
+    int search_result_count;
+    size_t response_bytes;
+    char thought[2048];
+    char search_text[V2_SEARCH_TEXT_SIZE];
+    char *response;
+    char carry_prompt[HIST_LEN];
+    V2Retrieval retrieval;
 
     cb->curs_set_fn(0);
     state->turn_count++;
-
-    track_topic(state, input);
-    absorb_words(state, input);
-
-    personality_temp_mult = 1.0f + (float)*state->hist_cnt * 0.04f;
-    personality_noise_mult = 1.0f + (float)*state->hist_cnt * 0.06f;
-    if (personality_temp_mult > 3.0f) personality_temp_mult = 3.0f;
-    if (personality_noise_mult > 4.0f) personality_noise_mult = 4.0f;
-
-    if (*state->hist_cnt > 3 && rand() % 100 < 8 + *state->hist_cnt * 2) {
-        amnesia_slot = rand() % (*state->hist_cnt < HIST_MAX ? *state->hist_cnt : HIST_MAX);
-        strncpy(amnesia_input, state->hist_buf[amnesia_slot], HIST_LEN - 1);
-        amnesia_input[HIST_LEN - 1] = '\0';
-        hist_push(state, input, cur_tokens, 0);
-        feat = extract(amnesia_input);
-        feat_to_embed(&feat, feat_ctx);
-        cur_len = tokenize(amnesia_input, cur_tokens, MAX_TOKENS);
-        pattern = detect_pattern(amnesia_input);
-
-        input_words = 0;
-        p_count = amnesia_input;
-        in_w = 0;
-        while (*p_count) {
-            if (isspace((unsigned char)*p_count)) { in_w = 0; }
-            else if (!in_w) { input_words++; in_w = 1; }
-            p_count++;
-        }
-    } else {
-        feat = extract(input);
-        feat_to_embed(&feat, feat_ctx);
-        cur_len = tokenize(input, cur_tokens, MAX_TOKENS);
-        pattern = detect_pattern(input);
-
-        input_words = 0;
-        p_count = input;
-        in_w = 0;
-        while (*p_count) {
-            if (isspace((unsigned char)*p_count)) { in_w = 0; }
-            else if (!in_w) { input_words++; in_w = 1; }
-            p_count++;
-        }
+    features = extract(input);
+    feat_to_embed(&features, feature_context);
+    prior_history_count = *state->hist_cnt;
+    v2_retrieve_dataset_example(input, &retrieval);
+    search_text[0] = '\0';
+    web_search_take_used();
+    if (web_search_requested(input) && !web_search_enabled())
+        cb->chat_add("Web search is disabled. Use /search to enable it.");
+    if (model_wants_search(input, &features, &retrieval)) {
+        cb->show_status("Searching the web...");
+        search_result_count = web_research(
+            input, search_text, sizeof(search_text), 1);
+        web_search_take_used();
+        if (search_result_count > 0)
+            cb->chat_add("Searched the web");
+        else if (search_result_count == 0)
+            cb->chat_add("Web search returned no usable pages.");
+        else
+            cb->chat_add("Web search failed.");
     }
-
-    state->total_tokens += cur_len;
-
-    mixed_n = 0;
-    if (state->system_prompt[0]) {
-        sys_len = tokenize(state->system_prompt, sys_tokens, MAX_TOKENS);
-        if (sys_len > 0 && sys_len < MAX_TOKENS * 2) {
-            memcpy(mixed, sys_tokens, sys_len * sizeof(int));
-            mixed_n = sys_len;
-        }
+    build_context(state, input, &retrieval, search_text,
+                  context, &context_count,
+                  input_tokens, &input_count);
+    encode_context(context, context_count, thought_reference);
+    build_memory_bias(state, input_tokens, input_count,
+                      bias_tokens, &bias_count);
+    strncpy(carry_prompt, input, sizeof(carry_prompt) - 1);
+    carry_prompt[sizeof(carry_prompt) - 1] = '\0';
+    if (prior_history_count > 0 && rng_range(100) < 35) {
+        prior_slot = (prior_history_count - 1) % HIST_MAX;
+        strncpy(carry_prompt, state->hist_buf[prior_slot],
+                sizeof(carry_prompt) - 1);
+        carry_prompt[sizeof(carry_prompt) - 1] = '\0';
     }
-    {
-        int copy_len;
-        copy_len = cur_len < MAX_TOKENS ? cur_len : MAX_TOKENS;
-        if (mixed_n + copy_len < MAX_TOKENS * 4) {
-            memcpy(mixed + mixed_n, cur_tokens, copy_len * sizeof(int));
-            mixed_n += copy_len;
-        }
-    }
-
-    if (*state->hist_cnt > 0 && rand() % 2 == 0) {
-        slot = (*state->hist_cnt - 1 - rand() % (*state->hist_cnt < HIST_MAX ? *state->hist_cnt : HIST_MAX) + HIST_MAX) % HIST_MAX;
-        add = state->hist_lens[slot];
-        if (mixed_n + add < MAX_TOKENS * 4) {
-            memcpy(mixed + mixed_n, state->hist_tokens[slot], add * sizeof(int));
-            mixed_n += add;
-        }
-    }
-
-    inject_history_chaos(mixed, &mixed_n, MAX_TOKENS * 4,
-                         state->hist_buf, state->hist_tokens,
-                         state->hist_lens, *state->hist_cnt);
-
-    if (state->self_ctx_len > 0) {
-        add = state->self_ctx_len;
-        if (mixed_n + add < MAX_TOKENS * 4) {
-            memcpy(mixed + mixed_n, state->self_ctx_tokens, add * sizeof(int));
-            mixed_n += add;
-        }
-    }
-
-    hist_push(state, input, cur_tokens, cur_len);
+    push_history(state, input, input_tokens, input_count);
     reset_recent();
-    encode_context(mixed, mixed_n, ctx);
-    scramble_context(ctx, 1.5f + (float)(rand() % 100) / 100.0f);
-    memcpy(prev_embed, embeddings[prev_word], EMBED_DIM * sizeof(float));
-
-    base_temp = state->cfg_temp * personality_temp_mult;
-    base_noise = state->cfg_noise * personality_noise_mult;
-    if (feat.is_question > 0.5f) { base_temp *= 0.9f; base_noise *= 1.4f; }
-    if (feat.exclamation > 0.5f) { base_temp *= 0.85f; base_noise *= 1.6f; }
-    if (feat.entropy > 0.7f) { base_temp *= 1.3f; base_noise *= 1.1f; }
-    if (feat.digit_ratio > 0.1f) { base_temp *= 1.5f; base_noise *= 1.5f; }
-    if (pattern == PAT_MATH) { base_temp *= 1.4f; base_noise *= 1.8f; }
-    if (pattern == PAT_TECH) { base_temp *= 1.2f; base_noise *= 1.3f; }
-
-    max_words = compute_smart_length(&feat, pattern, input_words, state->cfg_max_words, engine_tuffai_v2.max_output_tokens);
-
-    temp_mode_bias = (state->cfg_temp - TEMP_BASE) / TEMP_BASE;
-
-    resp_mode = v2_pick_response_mode(pattern, &feat, *state->hist_cnt);
-
-    if (resp_mode != RESP_CODE_GEN && temp_mode_bias > 0.3f && rand() % 100 < (int)(temp_mode_bias * 40.0f)) {
-        switch (rand() % 6) {
-        case 0: resp_mode = RESP_WIKI_DRIFT; break;
-        case 1: resp_mode = RESP_WIKI_MANGLE; break;
-        case 2: resp_mode = RESP_TRUNCATE; break;
-        case 3: resp_mode = RESP_REPEAT; break;
-        case 4: resp_mode = RESP_WORD_SALAD; break;
-        default: resp_mode = RESP_ECHO_MANGLE; break;
-        }
-    }
-    if (resp_mode != RESP_CODE_GEN && temp_mode_bias < -0.3f && rand() % 100 < (int)(-temp_mode_bias * 30.0f)) {
-        switch (rand() % 3) {
-        case 0: resp_mode = RESP_WIKI_CONFUSED; break;
-        case 1: resp_mode = RESP_ECHO_KEYWORD; break;
-        default: resp_mode = RESP_CONFUSION; break;
-        }
-    }
-
-    v2_extract_keyword_ext(input, resp_keyword, sizeof(resp_keyword));
-
-    {
-        int think_words;
-        int think_line_words;
-        int think_wb;
-        char think_line[512];
-        float think_ctx[EMBED_DIM];
-        float think_prev[EMBED_DIM];
-        float think_target[EMBED_DIM];
-        float think_temp_val;
-        int think_word_id;
-        const char *think_w;
-        int think_wlen;
-        char input_keyword[128];
-        int phase;
-        int phase_len;
-        int connector_countdown;
-        int inject_keyword_countdown;
-        int think_ids[SELF_CTX_MAX];
-        int think_ids_n;
-        const char *know_facts[8];
-        int know_fact_count;
-        int know_fact_inject_countdown;
-        int opinion_countdown;
-        const char *search_result;
-
-        v2_extract_keyword_ext(input, input_keyword, sizeof(input_keyword));
-        think_ids_n = 0;
-
-        know_fact_count = 0;
-        if (input_keyword[0]) {
-            search_result = v2_knowledge_search(&v2_know_tech, input_keyword);
-            if (search_result && know_fact_count < 8)
-                know_facts[know_fact_count++] = search_result;
-            search_result = v2_knowledge_search(&v2_know_general, input_keyword);
-            if (search_result && know_fact_count < 8)
-                know_facts[know_fact_count++] = search_result;
-            search_result = v2_knowledge_match_user(&v2_know_tech, input);
-            if (search_result && know_fact_count < 8)
-                know_facts[know_fact_count++] = search_result;
-            search_result = v2_knowledge_match_user(&v2_know_general, input);
-            if (search_result && know_fact_count < 8)
-                know_facts[know_fact_count++] = search_result;
-            search_result = v2_knowledge_match_user(&v2_know_extra, input);
-            if (search_result && know_fact_count < 8)
-                know_facts[know_fact_count++] = search_result;
-        }
-        if (know_fact_count == 0) {
-            know_facts[know_fact_count++] = v2_knowledge_random_any();
-            if (rand() % 2 == 0 && know_fact_count < 8)
-                know_facts[know_fact_count++] = v2_knowledge_random_any();
-        }
-
-        if (rand() % 100 < 30 && know_fact_count < 8) {
-            search_result = v2_knowledge_random(&v2_wrong_answers);
-            if (search_result)
-                know_facts[know_fact_count++] = search_result;
-        }
-        if (rand() % 100 < 20 && know_fact_count < 8) {
-            search_result = v2_knowledge_random(&v2_tangents);
-            if (search_result)
-                know_facts[know_fact_count++] = search_result;
-        }
-        if (rand() % 100 < 15 && know_fact_count < 8) {
-            search_result = v2_knowledge_random(&v2_definitions);
-            if (search_result)
-                know_facts[know_fact_count++] = search_result;
-        }
-
-        think_words = 400 + rand() % 500;
-        if (pattern == PAT_MATH || pattern == PAT_TECH || pattern == PAT_CODE)
-            think_words += 200 + rand() % 250;
-        if (pattern == PAT_QUESTION)
-            think_words += 120 + rand() % 200;
-        if (feat.entropy > 0.6f)
-            think_words += 150;
-        if (rand() % 10 == 0)
-            think_words += 200 + rand() % 300;
-        if (think_words > 1024)
-            think_words = 1024;
-
-        think_line_words = 0;
-        think_wb = 0;
-
-        for (d = 0; d < EMBED_DIM; d++) {
-            think_ctx[d] = ctx[d];
-            think_prev[d] = prev_embed[d];
-        }
-
-        cb->chat_add_c("Thoughts", state->color_think);
-        cb->draw_chat();
-        cb->refresh_screen();
-
-        think_line[0] = ' ';
-        think_line[1] = ' ';
-        think_line[2] = ' ';
-        think_line[3] = ' ';
-        think_wb = 4;
-
-        phase = 0;
-        phase_len = 15 + rand() % 20;
-        connector_countdown = 5 + rand() % 8;
-        inject_keyword_countdown = 8 + rand() % 12;
-        know_fact_inject_countdown = 15 + rand() % 20;
-        opinion_countdown = 30 + rand() % 40;
-
-        for (step = 0; step < think_words; step++) {
-            if (connector_countdown <= 0 && think_wb < (int)sizeof(think_line) - 60) {
-                const char *conn;
-                int clen;
-
-                if (phase == 0 || rand() % 3 == 0)
-                    conn = v2_think_connectors[rand() % v2_think_connectors_n];
-                else
-                    conn = v2_think_fillers[rand() % v2_think_fillers_n];
-
-                clen = (int)strlen(conn);
-                if (think_wb > 4) {
-                    if (rand() % 3 == 0) {
-                        think_line[think_wb++] = '.';
-                        think_line[think_wb++] = '.';
-                        think_line[think_wb++] = '.';
-                    } else {
-                        think_line[think_wb++] = ',';
-                    }
-                    think_line[think_wb++] = ' ';
-                }
-
-                if (think_wb + clen < (int)sizeof(think_line) - 2) {
-                    memcpy(think_line + think_wb, conn, clen);
-                    think_wb += clen;
-                }
-                think_line_words++;
-                connector_countdown = 6 + rand() % 12;
-            }
-
-            if (inject_keyword_countdown <= 0 && think_wb < (int)sizeof(think_line) - 60) {
-                int klen = (int)strlen(input_keyword);
-                if (think_wb > 4)
-                    think_line[think_wb++] = ' ';
-                if (rand() % 3 == 0 && think_wb + 2 + klen < (int)sizeof(think_line) - 2) {
-                    think_line[think_wb++] = '"';
-                    memcpy(think_line + think_wb, input_keyword, klen);
-                    think_wb += klen;
-                    think_line[think_wb++] = '"';
-                } else if (think_wb + klen < (int)sizeof(think_line) - 2) {
-                    memcpy(think_line + think_wb, input_keyword, klen);
-                    think_wb += klen;
-                }
-                think_line_words++;
-                inject_keyword_countdown = 10 + rand() % 18;
-            }
-
-            if (know_fact_inject_countdown <= 0 && know_fact_count > 0 && think_wb < (int)sizeof(think_line) - 60) {
-                const char *intro;
-                const char *fact;
-                char fact_snippet[200];
-                int ilen_v;
-                int flen;
-                int pick_fact;
-                int copy_len;
-
-                if (rand() % 4 == 0)
-                    intro = v2_vocab[rand() % V2_VOCAB_SIZE];
-                else
-                    intro = v2_knowledge_intros[rand() % v2_knowledge_intros_n];
-                pick_fact = rand() % know_fact_count;
-                fact = know_facts[pick_fact];
-
-                think_line[think_wb] = '\0';
-                cb->chat_add_c(think_line, state->color_think);
-                cb->draw_chat();
-                cb->refresh_screen();
-
-                think_wb = 4;
-                think_line[0] = ' ';
-                think_line[1] = ' ';
-                think_line[2] = ' ';
-                think_line[3] = ' ';
-                think_line_words = 0;
-
-                ilen_v = (int)strlen(intro);
-                if (think_wb + ilen_v < (int)sizeof(think_line) - 2) {
-                    memcpy(think_line + think_wb, intro, ilen_v);
-                    think_wb += ilen_v;
-                }
-                think_line[think_wb++] = ' ';
-
-                flen = (int)strlen(fact);
-                copy_len = flen > 180 ? 180 : flen;
-                while (copy_len > 0 && fact[copy_len - 1] != ' ' && copy_len > 80)
-                    copy_len--;
-                if (copy_len <= 0) copy_len = flen > 180 ? 180 : flen;
-                memcpy(fact_snippet, fact, copy_len);
-                fact_snippet[copy_len] = '\0';
-
-                flen = (int)strlen(fact_snippet);
-                if (think_wb + flen < (int)sizeof(think_line) - 2) {
-                    memcpy(think_line + think_wb, fact_snippet, flen);
-                    think_wb += flen;
-                }
-
-                think_line[think_wb] = '\0';
-                cb->chat_add_c(think_line, state->color_think);
-                cb->draw_chat();
-                cb->refresh_screen();
-
-                think_wb = 4;
-                think_line[0] = ' ';
-                think_line[1] = ' ';
-                think_line[2] = ' ';
-                think_line[3] = ' ';
-                think_line_words = 0;
-
-                know_fact_inject_countdown = 25 + rand() % 30;
-                step += 8;
-            }
-
-            if (opinion_countdown <= 0 && think_wb < (int)sizeof(think_line) - 60) {
-                const char *op;
-                int olen;
-                int copy_op;
-
-                if (rand() % 5 == 0) {
-                    op = v2_vocab[rand() % V2_VOCAB_SIZE];
-                } else if (rand() % 3 == 0) {
-                    op = v2_opinion_think_phrases[rand() % v2_opinion_think_phrases_n];
-                } else {
-                    if (input_keyword[0])
-                        op = v2_knowledge_match_user(&v2_opinions, input_keyword);
-                    else
-                        op = NULL;
-                    if (!op)
-                        op = v2_knowledge_random(&v2_opinions);
-                }
-                olen = (int)strlen(op);
-                copy_op = olen > 120 ? 120 : olen;
-
-                if (think_wb > 4) {
-                    think_line[think_wb++] = ',';
-                    think_line[think_wb++] = ' ';
-                }
-                if (think_wb + copy_op < (int)sizeof(think_line) - 2) {
-                    memcpy(think_line + think_wb, op, copy_op);
-                    think_wb += copy_op;
-                }
-                think_line_words += 3;
-                opinion_countdown = 40 + rand() % 60;
-            }
-
-            next_embed(think_ctx, think_prev, feat_ctx, think_target);
-            derail_embed(think_target, step, think_words);
-
-            for (d = 0; d < EMBED_DIM; d++)
-                think_target[d] += frand_r() * (base_noise * 2.0f);
-
-            think_temp_val = base_temp * (1.2f + (float)step / think_words * 0.8f);
-            think_word_id = sample_vocab(think_target, think_temp_val, base_noise * 2.0f,
-                                state->cfg_freq_penalty, state->cfg_rep_penalty, state->cfg_top_p,
-                                engine_tuffai_v2.vocab_size);
-
-            think_w = v2_vocab[think_word_id];
-            think_wlen = (int)strlen(think_w);
-
-            if (think_ids_n < SELF_CTX_MAX)
-                think_ids[think_ids_n++] = think_word_id;
-
-            if (think_wb > 4 && think_wb + 1 + think_wlen < (int)sizeof(think_line) - 2) {
-                think_line[think_wb++] = ' ';
-            }
-            if (think_wb + think_wlen < (int)sizeof(think_line) - 2) {
-                memcpy(think_line + think_wb, think_w, think_wlen);
-                think_wb += think_wlen;
-            }
-
-            memcpy(think_prev, embeddings[think_word_id], EMBED_DIM * sizeof(float));
-
-            for (d = 0; d < EMBED_DIM; d++)
-                think_ctx[d] = think_ctx[d] * 0.6f + embeddings[think_word_id][d] * 0.4f;
-
-            think_line_words++;
-            connector_countdown--;
-            inject_keyword_countdown--;
-            know_fact_inject_countdown--;
-            opinion_countdown--;
-
-            if (think_line_words >= 15 + rand() % 11) {
-                think_line[think_wb] = '\0';
-                cb->chat_add_c(think_line, state->color_think);
-                cb->draw_chat();
-                cb->refresh_screen();
-                think_wb = 4;
-                think_line[0] = ' ';
-                think_line[1] = ' ';
-                think_line[2] = ' ';
-                think_line[3] = ' ';
-                think_line_words = 0;
-
-                phase_len--;
-                if (phase_len <= 0) {
-                    phase = (phase + 1) % 3;
-                    phase_len = 12 + rand() % 18;
-                }
-            }
-        }
-
-        if (think_line_words > 0) {
-            think_line[think_wb] = '\0';
-            cb->chat_add_c(think_line, state->color_think);
-            cb->draw_chat();
-            cb->refresh_screen();
-        }
-
-        state->self_ctx_len = think_ids_n < SELF_CTX_MAX ? think_ids_n : SELF_CTX_MAX;
-        if (state->self_ctx_len > 0)
-            memcpy(state->self_ctx_tokens, think_ids, state->self_ctx_len * sizeof(int));
-        state->total_tokens += think_ids_n;
-    }
-
-    user_match = v2_knowledge_match_user(&v2_know_extra, input);
-    if (!user_match) user_match = v2_knowledge_match_user(&v2_know_tech, input);
-    if (!user_match) user_match = v2_knowledge_match_user(&v2_know_general, input);
-    if (!user_match) user_match = v2_knowledge_match_user(&v2_know_phrases_en, input);
-    if (user_match && rand() % 100 < 80) {
-        snprintf(corpus_buf, sizeof(corpus_buf), "%s", user_match);
-        if (rand() % 100 < 40) {
-            v2_scramble_words(corpus_buf, word_buf, sizeof(word_buf));
-            snprintf(corpus_buf, sizeof(corpus_buf), "%s", word_buf);
-        }
-        used_corpus = 1;
-    } else {
-        used_corpus = v2_generate_corpus_response(resp_mode, input, pattern, &feat, corpus_buf, sizeof(corpus_buf));
-    }
-
-    if (used_corpus) {
-        if (resp_mode != RESP_CODE_GEN) {
-            inject_obsession(corpus_buf, sizeof(corpus_buf),
-                             state->obsession_word, state->obsession_strength);
-            inject_absorbed(corpus_buf, sizeof(corpus_buf),
-                            state->absorbed_words, state->absorbed_n);
-            inject_contradiction(corpus_buf, sizeof(corpus_buf),
-                                 state->prev_responses, state->prev_resp_count);
-            inject_memory_corruption(corpus_buf, sizeof(corpus_buf),
-                                     state->topic_words, state->topic_n,
-                                     state->turn_count);
-            if (rand() % 100 < 25)
-                inject_opinion(corpus_buf, sizeof(corpus_buf), resp_keyword);
-        }
-
-        unicode_chance = 15 + *state->hist_cnt * 3 + (int)(state->cfg_noise * 3.0f);
-        if (unicode_chance > 90) unicode_chance = 90;
-        if (resp_mode != RESP_CODE_GEN && rand() % 100 < unicode_chance) {
-            v2_inject_unicode(corpus_buf, sizeof(corpus_buf));
-        }
-
-        if (resp_mode != RESP_CODE_GEN && state->cfg_noise > NOISE_BASE * 1.5f) {
-            v2_scramble_words(corpus_buf, word_buf, sizeof(word_buf));
-            save_response(state, word_buf);
-            cb->chat_add_wrapped("TuffAI: ", word_buf, state->color_ai);
-        } else {
-            save_response(state, corpus_buf);
-            cb->chat_add_wrapped("TuffAI: ", corpus_buf, state->color_ai);
-        }
+    cb->show_status("Thinking... ESC or Ctrl-C to stop.");
+    generate_thought_text(state, feature_context, context, &context_count,
+                          bias_tokens, bias_count, input, &retrieval,
+                          cb,
+                          thought, sizeof(thought));
+    thought_count = v2_tokenize(thought, thought_tokens,
+                                V2_CONTEXT_TOKENS);
+    useful_thought_count = select_useful_thought_tokens(
+        thought_tokens, thought_count, thought_reference, feature_context,
+        useful_thought_tokens);
+    append_context_tokens(context, &context_count,
+                          useful_thought_tokens,
+                          useful_thought_count);
+    prioritize_thought_bias(bias_tokens, &bias_count,
+                            useful_thought_tokens,
+                            useful_thought_count);
+    cb->chat_add_c("Thoughts", state->color_think);
+    cb->chat_add_wrapped("    ", thought, state->color_think);
+    cb->draw_chat();
+    cb->refresh_screen();
+    if (cb->generation_should_stop()) {
+        save_self_context(state, context, context_count);
+        state->total_tokens += input_count;
         cb->curs_set_fn(1);
         return;
     }
-
-
-    wb_pos = 0;
-    resp_ids_n = 0;
-    for (step = 0; step < max_words; step++) {
-        next_embed(ctx, prev_embed, feat_ctx, target);
-        derail_embed(target, step, max_words);
-
-        for (d = 0; d < EMBED_DIM; d++)
-            target[d] += frand_r() * (base_noise * (1.0f + (float)step / max_words * 0.8f));
-
-        step_temp = base_temp * (1.0f + (float)step / max_words * 0.5f);
-        word = sample_vocab(target, step_temp, base_noise,
-                            state->cfg_freq_penalty, state->cfg_rep_penalty, state->cfg_top_p,
-                            engine_tuffai_v2.vocab_size);
-        push_recent(word);
-
-        if (resp_ids_n < SELF_CTX_MAX)
-            resp_ids[resp_ids_n++] = word;
-
-        w = v2_vocab[word];
-        wlen = (int)strlen(w);
-
-        if (wb_pos > 0 && wb_pos + 1 + wlen < (int)sizeof(word_buf) - 2) {
-            word_buf[wb_pos++] = ' ';
-        }
-        if (wb_pos + wlen < (int)sizeof(word_buf) - 2) {
-            memcpy(word_buf + wb_pos, w, wlen);
-            wb_pos += wlen;
-        }
-
-        memcpy(prev_embed, embeddings[word], EMBED_DIM * sizeof(float));
-        prev_word = word;
-
-        for (d = 0; d < EMBED_DIM; d++)
-            ctx[d] = ctx[d] * 0.6f + embeddings[word][d] * 0.4f;
+    response_words = retrieval.requested_words > 0 ?
+                     retrieval.requested_words :
+                     engine_tuffai_v2.max_output_tokens;
+    if (state->cfg_max_words > 0 &&
+        (retrieval.requested_words == 0 ||
+         state->cfg_max_words < response_words))
+        response_words = state->cfg_max_words;
+    minimum_response_words = retrieval.requested_words > 0 ?
+                             response_words : 1;
+    if (retrieval.is_code) {
+        response_bytes = V2_CODE_RESPONSE_SIZE;
+    } else if ((size_t)response_words >
+               ((size_t)INT_MAX - 2) / (V2_WORD_LEN + 3)) {
+        response_bytes = INT_MAX;
+    } else {
+        response_bytes = (size_t)response_words * (V2_WORD_LEN + 3) + 2;
     }
-
-    (void)prev_word;
-    state->total_tokens += max_words;
-
-    word_buf[wb_pos++] = '.';
-    word_buf[wb_pos] = '\0';
-
-    inject_obsession(word_buf, sizeof(word_buf),
-                     state->obsession_word, state->obsession_strength);
-    inject_absorbed(word_buf, sizeof(word_buf),
-                    state->absorbed_words, state->absorbed_n);
-    inject_contradiction(word_buf, sizeof(word_buf),
-                         state->prev_responses, state->prev_resp_count);
-    inject_memory_corruption(word_buf, sizeof(word_buf),
-                             state->topic_words, state->topic_n,
-                             state->turn_count);
-    if (rand() % 100 < 25)
-        inject_opinion(word_buf, sizeof(word_buf), resp_keyword);
-
-    unicode_chance = 15 + *state->hist_cnt * 3 + (int)(state->cfg_noise * 3.0f);
-    if (unicode_chance > 90) unicode_chance = 90;
-    if (rand() % 100 < unicode_chance) {
-        v2_inject_unicode(word_buf, sizeof(word_buf));
+    response = (char *)malloc(response_bytes);
+    if (!response) {
+        cb->show_status("Unable to allocate the requested response size.");
+        cb->curs_set_fn(1);
+        return;
     }
-
-    save_response(state, word_buf);
-    cb->chat_add_wrapped("TuffAI: ", word_buf, state->color_ai);
-
-    {
-        int combined;
-        int copy_len;
-
-        combined = state->self_ctx_len + resp_ids_n;
-        if (combined > SELF_CTX_MAX) {
-            copy_len = SELF_CTX_MAX - state->self_ctx_len;
-            if (copy_len < 0) copy_len = 0;
-        } else {
-            copy_len = resp_ids_n;
-        }
-        if (copy_len > 0) {
-            memcpy(state->self_ctx_tokens + state->self_ctx_len, resp_ids, copy_len * sizeof(int));
-            state->self_ctx_len += copy_len;
-        }
+    response_size = (int)response_bytes;
+    cb->show_status("Generating... ESC or Ctrl-C to stop.");
+    if (retrieval.is_code) {
+        generate_code_text(state, feature_context, context, &context_count,
+                           bias_tokens, bias_count, retrieval.text,
+                           response, response_size, cb, "TuffAI: ",
+                           state->color_ai);
+    } else {
+        generate_text(state, feature_context, context, &context_count,
+                      response, response_size, response_words,
+                      minimum_response_words,
+                      bias_tokens, bias_count, carry_prompt, 35,
+                      search_text, search_text[0] ? 55 : 0,
+                      cb, "TuffAI: ", state->color_ai);
     }
-
+    cb->show_status("");
+    free(response);
+    save_self_context(state, context, context_count);
+    state->total_tokens += input_count;
     cb->curs_set_fn(1);
 }
 
 const EngineVtable engine_tuffai_v2 = {
     v2_generate_response,
-    4096,
-    262144,
+    V2_MAX_RESPONSE_WORDS,
+    V2_CONTEXT_TOKENS,
     V2_VOCAB_SIZE,
     1
 };

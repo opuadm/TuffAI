@@ -6,11 +6,11 @@
 #include "tokenizer.h"
 
 #define RESP_WORD_SALAD      0
-#define RESP_WIKI_CONFUSED   1
+#define RESP_SEARCH_CONFUSED   1
 #define RESP_ECHO_KEYWORD    2
-#define RESP_WIKI_DRIFT      3
+#define RESP_SEARCH_DRIFT      3
 #define RESP_CONFUSION       4
-#define RESP_WIKI_MANGLE     5
+#define RESP_SEARCH_MANGLE     5
 #define RESP_MARKOV          6
 #define RESP_ECHO_MANGLE     7
 #define RESP_SINGLE_WORD     8
@@ -19,7 +19,7 @@
 #define RESP_CODE_GEN       11
 #define RESP_MULTILANG      12
 #define RESP_KNOWLEDGE      13
-#define RESP_WIKI_FOREIGN   14
+#define RESP_SEARCH_FOREIGN   14
 #define RESP_WRONG_ANSWER   15
 #define RESP_WRONG_MATH     16
 #define RESP_FAKE_DEFINE    17

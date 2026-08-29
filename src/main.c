@@ -1,4 +1,6 @@
 #define _POSIX_C_SOURCE 200809L
+#define _XOPEN_SOURCE 700
+#define _XOPEN_SOURCE_EXTENDED 1
 #include <stdio.h>
 #include <stdlib.h>
 #include <errno.h>
@@ -8,12 +10,14 @@
 #include <time.h>
 #include <ctype.h>
 #include <signal.h>
+#include <locale.h>
+#include <wchar.h>
 #include <ncurses.h>
 #include "knowledge/knowledge.h"
 #include "net.h"
 #include "features.h"
 #include "tokenizer.h"
-#include "wikifetch.h"
+#include "websearch.h"
 #include "version.h"
 #include "engine.h"
 
@@ -33,7 +37,10 @@ static int chat_count = 0;
 static int chat_scroll = 0;
 static volatile int got_sigwinch = 0;
 static volatile int got_sigint = 0;
+static int generation_stop_requested = 0;
 static int train_mode = 0;
+
+static void draw_chat(void);
 
 typedef struct {
     const char *cmd;
@@ -50,7 +57,7 @@ static const SlashCmd slash_cmds[] = {
     {"/maxwords", "max response words"},
     {"/model", "switch model"},
     {"/prompt", "edit system prompt"},
-    {"/wikifetch", "toggle wiki fetch"},
+    {"/search", "toggle web search"},
     {"/train", "toggle train mode"},
     {"/stats", "session statistics"},
     {"/clear", "clear chat"},
@@ -66,6 +73,93 @@ static int hist_lens[HIST_MAX];
 static int hist_cnt = 0;
 
 static EngineState engine_state;
+
+static int utf8_character_bytes(const char *text, int available, int *width) {
+    mbstate_t state;
+    wchar_t wide;
+    size_t result;
+    int display_width;
+
+    memset(&state, 0, sizeof(state));
+    result = mbrtowc(&wide, text, (size_t)available, &state);
+    if (result == (size_t)-1 || result == (size_t)-2 || result == 0) {
+        *width = 1;
+        return 1;
+    }
+    display_width = wcwidth(wide);
+    if (display_width < 0) display_width = 1;
+    *width = display_width;
+    return (int)result;
+}
+
+static int utf8_prefix_bytes(const char *text, int byte_limit) {
+    int length;
+    int position;
+    int character_bytes;
+    int width;
+
+    length = (int)strlen(text);
+    if (length <= byte_limit) return length;
+    position = 0;
+    while (position < length) {
+        character_bytes = utf8_character_bytes(text + position,
+                                               length - position, &width);
+        if (position + character_bytes > byte_limit) break;
+        position += character_bytes;
+    }
+    return position;
+}
+
+static int utf8_display_width(const char *text) {
+    int length;
+    int position;
+    int character_bytes;
+    int character_width;
+    int width;
+
+    length = (int)strlen(text);
+    position = 0;
+    width = 0;
+    while (position < length) {
+        character_bytes = utf8_character_bytes(text + position,
+                                               length - position,
+                                               &character_width);
+        position += character_bytes;
+        width += character_width;
+    }
+    return width;
+}
+
+static void draw_utf8_chat_line(int row, const char *text) {
+    wchar_t wide[CHAT_LINE_LEN];
+    mbstate_t state;
+    size_t converted;
+    int byte_length;
+    int byte_position;
+    int wide_position;
+
+    memset(&state, 0, sizeof(state));
+    byte_length = (int)strlen(text);
+    byte_position = 0;
+    wide_position = 0;
+    while (byte_position < byte_length &&
+           wide_position < CHAT_LINE_LEN - 1) {
+        converted = mbrtowc(&wide[wide_position], text + byte_position,
+                            (size_t)(byte_length - byte_position), &state);
+        if (converted == (size_t)-1 || converted == (size_t)-2) {
+            memset(&state, 0, sizeof(state));
+            wide[wide_position++] = L'?';
+            byte_position++;
+        } else if (converted == 0) {
+            break;
+        } else {
+            wide_position++;
+            byte_position += (int)converted;
+        }
+    }
+    wide[wide_position] = L'\0';
+    mvaddnwstr(row, 0, wide, wide_position);
+}
 
 typedef struct {
     const char *name;
@@ -84,12 +178,12 @@ static const ModelDef models[] = {
     {
         "TuffAI-v2",
         "Latest TuffAI Version",
-        75.0f,
-        2.5f,
-        19.5f,
-        19.0f,
-        0.02f,
-        10.0f,
+        1.35f,
+        0.9f,
+        0.8f,
+        1.2f,
+        0.92f,
+        0.4f,
         &engine_tuffai_v2,
     },
 #endif
@@ -119,7 +213,8 @@ static void chat_add(const char *line) {
     if (!line || !line[0]) return;
     slot = chat_count % CHAT_LINES;
     len = (int)strlen(line);
-    if (len >= CHAT_LINE_LEN) len = CHAT_LINE_LEN - 1;
+    if (len >= CHAT_LINE_LEN)
+        len = utf8_prefix_bytes(line, CHAT_LINE_LEN - 1);
     memcpy(chat_log[slot], line, len);
     chat_log[slot][len] = '\0';
     chat_colors[slot] = 0;
@@ -134,7 +229,8 @@ static void chat_add_c(const char *line, int color) {
     if (!line || !line[0]) return;
     slot = chat_count % CHAT_LINES;
     len = (int)strlen(line);
-    if (len >= CHAT_LINE_LEN) len = CHAT_LINE_LEN - 1;
+    if (len >= CHAT_LINE_LEN)
+        len = utf8_prefix_bytes(line, CHAT_LINE_LEN - 1);
     memcpy(chat_log[slot], line, len);
     chat_log[slot][len] = '\0';
     chat_colors[slot] = color;
@@ -148,9 +244,16 @@ static void chat_add_wrapped(const char *prefix, const char *text, int color) {
     int tlen;
     int pos;
     int first;
-    int chunk;
     int cut;
-    int nl;
+    int scan;
+    int last_space;
+    int columns;
+    int available_columns;
+    int prefix_columns;
+    int prefix_bytes;
+    int character_bytes;
+    int character_width;
+    int line_bytes;
 
     max_w = COLS - 2;
     if (max_w < 20) max_w = 20;
@@ -161,51 +264,101 @@ static void chat_add_wrapped(const char *prefix, const char *text, int color) {
     first = 1;
 
     while (pos < tlen) {
-        if (first && prefix) {
-            chunk = max_w - (int)strlen(prefix);
-            if (chunk < 1) chunk = 1;
-            if (pos + chunk > tlen) chunk = tlen - pos;
-            for (nl = 0; nl < chunk; nl++) {
-                if (text[pos + nl] == '\n') break;
-            }
-            if (nl < chunk) {
-                cut = nl;
-            } else {
-                cut = chunk;
-                if (pos + chunk < tlen) {
-                    while (cut > 0 && text[pos + cut] != ' ') cut--;
-                    if (cut <= 0) cut = chunk;
-                }
-            }
-            snprintf(line, sizeof(line), "%s%.*s", prefix, cut, text + pos);
-            chat_add_c(line, color);
-            pos += cut;
-            first = 0;
-        } else {
-            chunk = max_w;
-            if (pos + chunk > tlen) chunk = tlen - pos;
-            for (nl = 0; nl < chunk; nl++) {
-                if (text[pos + nl] == '\n') break;
-            }
-            if (nl < chunk) {
-                cut = nl;
-            } else {
-                cut = chunk;
-                if (pos + chunk < tlen) {
-                    while (cut > 0 && text[pos + cut] != ' ') cut--;
-                    if (cut <= 0) cut = chunk;
-                }
-            }
-            snprintf(line, sizeof(line), "%.*s", cut, text + pos);
-            chat_add_c(line, color);
-            pos += cut;
+        prefix_bytes = first && prefix ? (int)strlen(prefix) : 0;
+        prefix_columns = first && prefix ? utf8_display_width(prefix) : 0;
+        available_columns = max_w - prefix_columns;
+        if (available_columns < 1) available_columns = 1;
+        scan = pos;
+        last_space = -1;
+        columns = 0;
+        while (scan < tlen && text[scan] != '\n') {
+            character_bytes = utf8_character_bytes(text + scan, tlen - scan,
+                                                   &character_width);
+            if (columns + character_width > available_columns) break;
+            if (prefix_bytes + scan - pos + character_bytes >= CHAT_LINE_LEN)
+                break;
+            if (text[scan] == ' ') last_space = scan;
+            columns += character_width;
+            scan += character_bytes;
         }
+        if (scan < tlen && text[scan] != '\n' && last_space > pos)
+            cut = last_space - pos;
+        else
+            cut = scan - pos;
+        if (cut <= 0) {
+            character_bytes = utf8_character_bytes(text + pos, tlen - pos,
+                                                   &character_width);
+            cut = character_bytes;
+        }
+        line_bytes = 0;
+        if (prefix_bytes > 0) {
+            memcpy(line, prefix, prefix_bytes);
+            line_bytes = prefix_bytes;
+        }
+        memcpy(line + line_bytes, text + pos, cut);
+        line_bytes += cut;
+        line[line_bytes] = '\0';
+        chat_add_c(line, color);
+        pos += cut;
+        first = 0;
         if (pos < tlen && text[pos] == '\n') {
             pos++;
         } else {
             while (pos < tlen && text[pos] == ' ') pos++;
         }
     }
+}
+
+static void draw_chat_entry(int row, int line_index) {
+    int color_pair;
+
+    move(row, 0);
+    clrtoeol();
+    if (line_index < 0 || line_index >= chat_count) return;
+    color_pair = chat_colors[line_index % CHAT_LINES];
+    if (color_pair > 0) attron(COLOR_PAIR(color_pair));
+    draw_utf8_chat_line(row, chat_log[line_index % CHAT_LINES]);
+    if (color_pair > 0) attroff(COLOR_PAIR(color_pair));
+}
+
+static void draw_streamed_chat(int previous_count, int previous_scroll) {
+    int rows;
+    int columns;
+    int chat_rows;
+    int previous_start;
+    int current_start;
+    int shifted_rows;
+    int first_new;
+    int line_index;
+    int row;
+
+    getmaxyx(stdscr, rows, columns);
+    chat_rows = rows - 4;
+    if (chat_rows < 1) chat_rows = 1;
+    previous_start = previous_count - chat_rows;
+    if (previous_start < 0) previous_start = 0;
+    current_start = chat_count - chat_rows;
+    if (current_start < 0) current_start = 0;
+    shifted_rows = current_start - previous_start;
+    if (previous_scroll != 0 || shifted_rows >= chat_rows || got_sigwinch) {
+        draw_chat();
+        return;
+    }
+    if (shifted_rows > 0) {
+        setscrreg(1, chat_rows);
+        scrollok(stdscr, TRUE);
+        wscrl(stdscr, shifted_rows);
+        scrollok(stdscr, FALSE);
+        setscrreg(0, rows - 1);
+    }
+    first_new = previous_count;
+    if (first_new < current_start) first_new = current_start;
+    for (line_index = first_new; line_index < chat_count; line_index++) {
+        row = 1 + line_index - current_start;
+        if (row >= 1 && row <= chat_rows)
+            draw_chat_entry(row, line_index);
+    }
+    (void)columns;
 }
 
 static void draw_chat(void) {
@@ -238,7 +391,8 @@ static void draw_chat(void) {
         if (line_idx >= 0 && line_idx < chat_count) {
             cpair = chat_colors[line_idx % CHAT_LINES];
             if (cpair > 0) attron(COLOR_PAIR(cpair));
-            mvaddnstr(i + 1, 0, chat_log[line_idx % CHAT_LINES], cols - 1);
+            draw_utf8_chat_line(i + 1,
+                                chat_log[line_idx % CHAT_LINES]);
             if (cpair > 0) attroff(COLOR_PAIR(cpair));
         }
     }
@@ -247,8 +401,10 @@ static void draw_chat(void) {
     attron(A_REVERSE | COLOR_PAIR(COLOR_STATUS));
     for (i = 0; i < cols; i++) addch(' ');
     mvprintw(chat_rows + 1, 1,
-        " Tokens:%d Turns:%d | T:%.1f N:%.1f FP:%.1f RP:%.1f TP:%.2f ",
-        engine_state.total_tokens, engine_state.turn_count, engine_state.cfg_temp, engine_state.cfg_noise,
+        " Tokens:%d Turns:%d Tok/s:%.1f | T:%.1f N:%.1f FP:%.1f RP:%.1f TP:%.2f ",
+        engine_state.total_tokens, engine_state.turn_count,
+        engine_state.last_tokens_per_second,
+        engine_state.cfg_temp, engine_state.cfg_noise,
         engine_state.cfg_freq_penalty, engine_state.cfg_rep_penalty, engine_state.cfg_top_p);
     attroff(A_REVERSE | COLOR_PAIR(COLOR_STATUS));
 
@@ -709,7 +865,7 @@ static int handle_command(const char *cmd) {
         chat_add("/maxwords <val>- override max response words (0=auto)");
         chat_add("/model         - Switch model");
         chat_add("/prompt        - Edit system prompt (v2 only)");
-        chat_add("/wikifetch     - toggle wiki fetching on/off");
+        chat_add("/search        - toggle autonomous web search");
         chat_add("/train         - toggle train mode (writes train.txt)");
         chat_add("/stats         - show session statistics");
         chat_add("/clear         - clear chat history");
@@ -725,13 +881,20 @@ static int handle_command(const char *cmd) {
         chat_add(model_line);
         snprintf(model_line, sizeof(model_line), "Total tokens: %d", engine_state.total_tokens);
         chat_add(model_line);
+        snprintf(model_line, sizeof(model_line), "Last generation: %.1f tok/s",
+                 engine_state.last_tokens_per_second);
+        chat_add(model_line);
         snprintf(model_line, sizeof(model_line), "History entries: %d", hist_cnt);
+        chat_add(model_line);
+        snprintf(model_line, sizeof(model_line), "Context window: %d tokens",
+                 models[current_model].engine->context_window);
         chat_add(model_line);
         snprintf(model_line, sizeof(model_line), "Topics tracked: %d", engine_state.topic_n);
         chat_add(model_line);
         snprintf(model_line, sizeof(model_line), "Absorbed words: %d", engine_state.absorbed_n);
         chat_add(model_line);
-        snprintf(model_line, sizeof(model_line), "Wiki: %s", wiki_enabled() ? "enabled" : "disabled");
+        snprintf(model_line, sizeof(model_line), "Web search: %s",
+                 web_search_enabled() ? "enabled" : "disabled");
         chat_add(model_line);
         if (engine_state.obsession_word[0]) {
             snprintf(model_line, sizeof(model_line), "Obsession: \"%s\" (strength: %d)", engine_state.obsession_word, engine_state.obsession_strength);
@@ -788,13 +951,13 @@ static int handle_command(const char *cmd) {
         return 1;
     }
 
-    if (strcmp(name, "/wikifetch") == 0) {
-        if (wiki_enabled()) {
-            wiki_set_enabled(0);
-            chat_add("Wiki fetching disabled.");
+    if (strcmp(name, "/search") == 0) {
+        if (web_search_enabled()) {
+            web_search_set_enabled(0);
+            chat_add("Autonomous web search disabled.");
         } else {
-            wiki_set_enabled(1);
-            chat_add("Wiki fetching enabled.");
+            web_search_set_enabled(1);
+            chat_add("Autonomous web search enabled.");
         }
         return 1;
     }
@@ -892,15 +1055,10 @@ static int handle_command(const char *cmd) {
     }
 
     if (strcmp(name, "/maxwords") == 0) {
-        int model_max = models[current_model].engine->max_output_tokens;
         errno = 0;
         end = NULL;
         parsed = strtol(arg, &end, 10);
         if (arg[0] != '\0' && end && end != arg && *end == '\0' && errno != ERANGE && parsed >= 0 && parsed <= INT_MAX) {
-            if (parsed > model_max) {
-                parsed = model_max;
-                chat_add("Value exceeds model limit; using maximum allowed.");
-            }
             engine_state.cfg_max_words = (int)parsed;
             if (engine_state.cfg_max_words == 0) {
                 chat_add("Max words set to auto.");
@@ -933,45 +1091,6 @@ static void show_status(const char *msg) {
     (void)cols;
 }
 
-static void sleep_with_scroll(int ms) {
-    int elapsed;
-    int ch;
-    int chunk;
-
-    if (ms <= 0) return;
-    elapsed = 0;
-
-    while (elapsed < ms) {
-        chunk = ms - elapsed;
-        if (chunk > 20) chunk = 20;
-        if (chunk < 1) chunk = 1;
-        timeout(chunk);
-        ch = getch();
-        if (ch == KEY_UP) {
-            if (chat_scroll < chat_count - 1) chat_scroll++;
-            draw_chat();
-            refresh();
-        } else if (ch == KEY_DOWN) {
-            if (chat_scroll > 0) chat_scroll--;
-            draw_chat();
-            refresh();
-        } else if (ch == KEY_PPAGE) {
-            chat_scroll += 10;
-            if (chat_scroll > chat_count - 1) chat_scroll = chat_count - 1;
-            draw_chat();
-            refresh();
-        } else if (ch == KEY_NPAGE) {
-            chat_scroll -= 10;
-            if (chat_scroll < 0) chat_scroll = 0;
-            draw_chat();
-            refresh();
-        }
-        if (ch == ERR) napms(chunk);
-        elapsed += chunk;
-    }
-    timeout(-1);
-}
-
 static void cb_refresh_screen(void) {
     refresh();
 }
@@ -980,15 +1099,47 @@ static void cb_curs_set_fn(int visibility) {
     curs_set(visibility);
 }
 
+static int cb_generation_should_stop(void) {
+    int ch;
+
+    if (generation_stop_requested) return 1;
+    if (got_sigint) {
+        got_sigint = 0;
+        generation_stop_requested = 1;
+        return 1;
+    }
+    timeout(0);
+    ch = getch();
+    timeout(-1);
+    if (ch == 3 || ch == 27) {
+        generation_stop_requested = 1;
+        return 1;
+    }
+    if (ch == KEY_RESIZE) got_sigwinch = 1;
+    return 0;
+}
+
+static void cb_stream_text(const char *prefix, const char *text, int color) {
+    int previous_count;
+    int previous_scroll;
+
+    previous_count = chat_count;
+    previous_scroll = chat_scroll;
+    chat_add_wrapped(prefix, text, color);
+    draw_streamed_chat(previous_count, previous_scroll);
+    refresh();
+}
+
 static const EngineCallbacks engine_callbacks = {
     chat_add,
     chat_add_c,
     chat_add_wrapped,
     draw_chat,
     show_status,
-    sleep_with_scroll,
     cb_refresh_screen,
-    cb_curs_set_fn
+    cb_curs_set_fn,
+    cb_generation_should_stop,
+    cb_stream_text
 };
 
 static void sync_engine_state(void) {
@@ -1072,6 +1223,11 @@ static void generate_response(const char *input) {
     float boost;
     float orig_freq;
     float orig_rep;
+    struct timespec started;
+    struct timespec finished;
+    double elapsed;
+    long sampled_before;
+    long sampled_delta;
 
     sync_engine_state();
 
@@ -1081,10 +1237,23 @@ static void generate_response(const char *input) {
     engine_state.cfg_freq_penalty += boost;
     engine_state.cfg_rep_penalty += boost * 0.8f;
 
+    sampled_before = engine_state.sampled_tokens;
+    generation_stop_requested = 0;
+    clock_gettime(CLOCK_MONOTONIC, &started);
     models[current_model].engine->generate_response(&engine_state, &engine_callbacks, input);
+    generation_stop_requested = 0;
+    clock_gettime(CLOCK_MONOTONIC, &finished);
+    elapsed = (double)(finished.tv_sec - started.tv_sec) +
+              (double)(finished.tv_nsec - started.tv_nsec) / 1000000000.0;
+    sampled_delta = engine_state.sampled_tokens - sampled_before;
+    if (elapsed > 0.0 && sampled_delta > 0)
+        engine_state.last_tokens_per_second = (float)((double)sampled_delta / elapsed);
+    else
+        engine_state.last_tokens_per_second = 0.0f;
 
     engine_state.cfg_freq_penalty = orig_freq;
     engine_state.cfg_rep_penalty = orig_rep;
+    draw_chat();
 }
 
 static void handle_sigwinch(int sig) {
@@ -1107,7 +1276,14 @@ int main(void) {
     struct sigaction sa_winch;
     struct sigaction sa_int;
 
-    net_init();
+    if (!setlocale(LC_CTYPE, "")) {
+        fprintf(stderr, "Unable to initialize the current locale.\n");
+        return 1;
+    }
+    if (!net_init()) {
+        fprintf(stderr, "Unable to obtain operating-system entropy.\n");
+        return 1;
+    }
 
     memset(&engine_state, 0, sizeof(engine_state));
     engine_state.cfg_temp = models[current_model].default_temp;

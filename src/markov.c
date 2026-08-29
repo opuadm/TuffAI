@@ -1,5 +1,5 @@
 #include "markov.h"
-#include "wikifetch.h"
+#include "websearch.h"
 #include "knowledge/knowledge.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -58,10 +58,10 @@ static const char *pick_next(const WordList *wl, const char *w1, const char *w2)
 }
 
 int markov_generate(const char *seed_text, char *out, int out_size, int max_words) {
-    char wiki_buf[8192];
+    char search_buf[8192];
     char combined[16384];
     WordList *wl;
-    int got_wiki;
+    int got_search;
     int start;
     char cur1[MKV_MAX_WORDLEN];
     char cur2[MKV_MAX_WORDLEN];
@@ -75,19 +75,19 @@ int markov_generate(const char *seed_text, char *out, int out_size, int max_word
     if (!seed_text) return 0;
     if (max_words < 0) max_words = 0;
 
-    got_wiki = 0;
+    got_search = 0;
     if (rand() % 2 == 0) {
-        got_wiki = wiki_fetch_search(seed_text, wiki_buf, sizeof(wiki_buf));
+        got_search = web_fetch_search(seed_text, search_buf, sizeof(search_buf));
     }
-    if (!got_wiki) {
-        got_wiki = wiki_fetch_random(wiki_buf, sizeof(wiki_buf));
+    if (!got_search) {
+        got_search = web_fetch_random(search_buf, sizeof(search_buf));
     }
-    if (!got_wiki) return 0;
+    if (!got_search) return 0;
 
     wl = malloc(sizeof(WordList));
     if (!wl) return 0;
 
-    snprintf(combined, sizeof(combined), "%s", wiki_buf);
+    snprintf(combined, sizeof(combined), "%s", search_buf);
 
     if (split_words(combined, wl) < 5) {
         free(wl);

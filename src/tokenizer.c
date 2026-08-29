@@ -544,6 +544,76 @@ int tokenize(const char *input, int *tokens, int max_tok) {
     return count;
 }
 
+#ifdef ENABLE_TUFFAI_V2
+static int ascii_case_equal(const char *left, const char *right) {
+    unsigned char a;
+    unsigned char b;
+
+    while (*left && *right) {
+        a = (unsigned char)*left++;
+        b = (unsigned char)*right++;
+        if (a < 128) a = (unsigned char)tolower(a);
+        if (b < 128) b = (unsigned char)tolower(b);
+        if (a != b) return 0;
+    }
+    return *left == '\0' && *right == '\0';
+}
+
+static int v2_vocab_index(const char *word) {
+    int i;
+
+    for (i = 0; i < V2_VOCAB_SIZE; i++)
+        if (ascii_case_equal(word, v2_vocab[i])) return i;
+    return -1;
+}
+
+static int utf8_sequence_length(unsigned char first) {
+    if (first < 0x80) return 1;
+    if ((first & 0xE0) == 0xC0) return 2;
+    if ((first & 0xF0) == 0xE0) return 3;
+    if ((first & 0xF8) == 0xF0) return 4;
+    return 1;
+}
+
+int v2_tokenize(const char *input, int *tokens, int max_tok) {
+    char *buffer;
+    char *word;
+    size_t input_length;
+    int count;
+    int index;
+    int byte_pos;
+    int sequence_len;
+    unsigned hash;
+
+    if (!input || !tokens || max_tok <= 0 || !input[0]) return 0;
+    input_length = strlen(input);
+    buffer = (char *)malloc(input_length + 1);
+    if (!buffer) return 0;
+    memcpy(buffer, input, input_length + 1);
+    count = 0;
+    word = strtok(buffer, " \t\n\r.,!?;:\"'()[]{}");
+    while (word && count < max_tok) {
+        index = v2_vocab_index(word);
+        if (index >= 0) {
+            tokens[count++] = index;
+        } else {
+            hash = hash_word(word);
+            tokens[count++] = (int)(hash % V2_VOCAB_SIZE);
+            byte_pos = 0;
+            while (word[byte_pos] && count < max_tok) {
+                sequence_len = utf8_sequence_length((unsigned char)word[byte_pos]);
+                hash = hash * 16777619u ^ (unsigned char)word[byte_pos];
+                byte_pos += sequence_len;
+                tokens[count++] = (int)(hash % V2_VOCAB_SIZE);
+            }
+        }
+        word = strtok(NULL, " \t\n\r.,!?;:\"'()[]{}");
+    }
+    free(buffer);
+    return count;
+}
+#endif
+
 typedef struct {
     const char *word;
     const char *confused[4];

@@ -3,13 +3,56 @@
 #include "../../../features.h"
 #include "../../../corpus.h"
 #include "../../../tokenizer.h"
-#include "../../../wikifetch.h"
+#include "../../../websearch.h"
 #include "../../../knowledge/knowledge.h"
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
 #include <math.h>
 #include <ctype.h>
+#include <limits.h>
+
+#define V1_CONTEXT_TOKENS 1024
+
+static void append_v1_context(int *context, int *context_count,
+                              const int *tokens, int token_count) {
+    int overflow;
+
+    if (token_count <= 0) return;
+    if (token_count > V1_CONTEXT_TOKENS) {
+        tokens += token_count - V1_CONTEXT_TOKENS;
+        token_count = V1_CONTEXT_TOKENS;
+    }
+    overflow = *context_count + token_count - V1_CONTEXT_TOKENS;
+    if (overflow > 0) {
+        memmove(context, context + overflow,
+                (*context_count - overflow) * sizeof(int));
+        *context_count -= overflow;
+    }
+    memcpy(context + *context_count, tokens, token_count * sizeof(int));
+    *context_count += token_count;
+}
+
+static void append_v1_self_context(EngineState *state, const int *tokens,
+                                   int token_count) {
+    int overflow;
+
+    if (token_count <= 0) return;
+    if (token_count > V1_CONTEXT_TOKENS) {
+        tokens += token_count - V1_CONTEXT_TOKENS;
+        token_count = V1_CONTEXT_TOKENS;
+    }
+    overflow = state->self_ctx_len + token_count - V1_CONTEXT_TOKENS;
+    if (overflow > 0) {
+        memmove(state->self_ctx_tokens,
+                state->self_ctx_tokens + overflow,
+                (state->self_ctx_len - overflow) * sizeof(int));
+        state->self_ctx_len -= overflow;
+    }
+    memcpy(state->self_ctx_tokens + state->self_ctx_len, tokens,
+           token_count * sizeof(int));
+    state->self_ctx_len += token_count;
+}
 
 static int compute_smart_length(const Features *feat, int pattern, int input_words, int cfg_max_words, int max_output_tokens) {
     float base;
@@ -18,7 +61,6 @@ static int compute_smart_length(const Features *feat, int pattern, int input_wor
 
     if (cfg_max_words > 0) {
         result = cfg_max_words;
-        if (max_output_tokens > 0 && result > max_output_tokens) result = max_output_tokens;
         if (result < 1) result = 1;
         return result;
     }
@@ -401,8 +443,10 @@ static void v1_generate_response(EngineState *state, const EngineCallbacks *cb, 
     Features feat;
     float feat_ctx[EMBED_DIM];
     int cur_tokens[MAX_TOKENS];
+    int search_tokens[V1_CONTEXT_TOKENS];
     int cur_len;
-    int mixed[MAX_TOKENS * 4];
+    int search_token_count;
+    int mixed[V1_CONTEXT_TOKENS];
     int mixed_n;
     int pattern;
     float ctx[EMBED_DIM];
@@ -419,12 +463,20 @@ static void v1_generate_response(EngineState *state, const EngineCallbacks *cb, 
     int in_w;
     int resp_mode;
     char corpus_buf[8192];
+    char search_text[8192];
     int used_corpus;
+    int explicit_search;
+    int search_result_count;
+    int input_pattern;
+    int autonomous_search_allowed;
+    int restore_search_enabled;
     int amnesia_slot;
     char amnesia_input[HIST_LEN];
     float personality_temp_mult;
     float personality_noise_mult;
-    char word_buf[4096];
+    char *word_buf;
+    size_t word_buf_bytes;
+    int word_buf_size;
     int wb_pos;
     int wlen;
     int unicode_chance;
@@ -432,12 +484,39 @@ static void v1_generate_response(EngineState *state, const EngineCallbacks *cb, 
     const char *user_match;
     int resp_ids[SELF_CTX_MAX];
     int resp_ids_n;
+    int streamed_pos;
+    int generated_words;
+    const char *stream_chunk;
 
     prev_word = rand() % ACTUAL_VOCAB;
 
     cb->curs_set_fn(0);
-    cb->show_status("Thinking...");
+    cb->show_status("Thinking... ESC or Ctrl-C to stop.");
     state->turn_count++;
+    web_search_take_used();
+    search_text[0] = '\0';
+    input_pattern = detect_pattern(input);
+    explicit_search = web_search_enabled() && web_search_requested(input);
+    autonomous_search_allowed = explicit_search ||
+        input_pattern == PAT_QUESTION || input_pattern == PAT_COMMAND ||
+        input_pattern == PAT_NEWS || input_pattern == PAT_TIME ||
+        input_pattern == PAT_TECH;
+    search_result_count = -2;
+    if (web_search_requested(input) && !web_search_enabled())
+        cb->chat_add("Web search is disabled. Use /search to enable it.");
+    if (explicit_search) {
+        cb->show_status("Searching the web...");
+        search_result_count = web_research(
+            input, search_text, sizeof(search_text), 0);
+        web_search_take_used();
+        if (search_result_count > 0)
+            cb->chat_add("Searched the web");
+        else if (search_result_count == 0)
+            cb->chat_add("Web search returned no usable pages.");
+        else
+            cb->chat_add("Web search failed.");
+        cb->show_status("Thinking... ESC or Ctrl-C to stop.");
+    }
 
     track_topic(state, input);
     absorb_words(state, input);
@@ -483,29 +562,31 @@ static void v1_generate_response(EngineState *state, const EngineCallbacks *cb, 
 
     state->total_tokens += cur_len;
 
-    mixed_n = cur_len < MAX_TOKENS ? cur_len : MAX_TOKENS;
-    memcpy(mixed, cur_tokens, mixed_n * sizeof(int));
+    mixed_n = 0;
 
     if (*state->hist_cnt > 0 && rand() % 2 == 0) {
         slot = (*state->hist_cnt - 1 - rand() % (*state->hist_cnt < HIST_MAX ? *state->hist_cnt : HIST_MAX) + HIST_MAX) % HIST_MAX;
         add = state->hist_lens[slot];
-        if (mixed_n + add < MAX_TOKENS * 4) {
-            memcpy(mixed + mixed_n, state->hist_tokens[slot], add * sizeof(int));
-            mixed_n += add;
-        }
+        append_v1_context(mixed, &mixed_n, state->hist_tokens[slot], add);
     }
 
-    inject_history_chaos(mixed, &mixed_n, MAX_TOKENS * 4,
+    inject_history_chaos(mixed, &mixed_n, V1_CONTEXT_TOKENS,
                          state->hist_buf, state->hist_tokens,
                          state->hist_lens, *state->hist_cnt);
 
     if (state->self_ctx_len > 0) {
         add = state->self_ctx_len;
-        if (mixed_n + add < MAX_TOKENS * 4) {
-            memcpy(mixed + mixed_n, state->self_ctx_tokens, add * sizeof(int));
-            mixed_n += add;
-        }
+        append_v1_context(mixed, &mixed_n, state->self_ctx_tokens, add);
     }
+
+    if (search_result_count > 0) {
+        search_token_count = tokenize(search_text, search_tokens,
+                                      V1_CONTEXT_TOKENS);
+        append_v1_context(mixed, &mixed_n, search_tokens,
+                          search_token_count);
+    }
+
+    append_v1_context(mixed, &mixed_n, cur_tokens, cur_len);
 
     hist_push(state, input, cur_tokens, cur_len);
     reset_recent();
@@ -524,14 +605,29 @@ static void v1_generate_response(EngineState *state, const EngineCallbacks *cb, 
 
     max_words = compute_smart_length(&feat, pattern, input_words, state->cfg_max_words, engine_tuffai_v1.max_output_tokens);
 
+    if ((size_t)max_words >
+        ((size_t)INT_MAX - 2) / (RENDERED_WORD_LEN + 1)) {
+        word_buf_bytes = INT_MAX;
+    } else {
+        word_buf_bytes = (size_t)max_words * (RENDERED_WORD_LEN + 1) + 2;
+    }
+    if (word_buf_bytes < 8192) word_buf_bytes = 8192;
+    word_buf = (char *)malloc(word_buf_bytes);
+    if (!word_buf) {
+        cb->show_status("Unable to allocate the requested response size.");
+        cb->curs_set_fn(1);
+        return;
+    }
+    word_buf_size = (int)word_buf_bytes;
+
     temp_mode_bias = (state->cfg_temp - TEMP_BASE) / TEMP_BASE;
 
     resp_mode = pick_response_mode(pattern, &feat, *state->hist_cnt);
 
     if (resp_mode != RESP_CODE_GEN && temp_mode_bias > 0.3f && rand() % 100 < (int)(temp_mode_bias * 40.0f)) {
         switch (rand() % 6) {
-        case 0: resp_mode = RESP_WIKI_DRIFT; break;
-        case 1: resp_mode = RESP_WIKI_MANGLE; break;
+        case 0: resp_mode = RESP_SEARCH_DRIFT; break;
+        case 1: resp_mode = RESP_SEARCH_MANGLE; break;
         case 2: resp_mode = RESP_TRUNCATE; break;
         case 3: resp_mode = RESP_REPEAT; break;
         case 4: resp_mode = RESP_WORD_SALAD; break;
@@ -540,7 +636,7 @@ static void v1_generate_response(EngineState *state, const EngineCallbacks *cb, 
     }
     if (resp_mode != RESP_CODE_GEN && temp_mode_bias < -0.3f && rand() % 100 < (int)(-temp_mode_bias * 30.0f)) {
         switch (rand() % 3) {
-        case 0: resp_mode = RESP_WIKI_CONFUSED; break;
+        case 0: resp_mode = RESP_SEARCH_CONFUSED; break;
         case 1: resp_mode = RESP_ECHO_KEYWORD; break;
         default: resp_mode = RESP_CONFUSION; break;
         }
@@ -620,6 +716,7 @@ static void v1_generate_response(EngineState *state, const EngineCallbacks *cb, 
         inject_keyword_countdown = 8 + rand() % 12;
 
         for (step = 0; step < think_words; step++) {
+            if (cb->generation_should_stop()) break;
             if (connector_countdown <= 0 && think_wb < (int)sizeof(think_line) - 60) {
                 const char *conn;
                 int clen;
@@ -701,10 +798,7 @@ static void v1_generate_response(EngineState *state, const EngineCallbacks *cb, 
 
             if (think_line_words >= 15 + rand() % 11) {
                 think_line[think_wb] = '\0';
-                cb->chat_add_c(think_line, state->color_think);
-                cb->draw_chat();
-                cb->refresh_screen();
-                cb->sleep_with_scroll(40 + rand() % 120);
+                cb->stream_text("", think_line, state->color_think);
                 think_wb = 4;
                 think_line[0] = ' ';
                 think_line[1] = ' ';
@@ -722,32 +816,51 @@ static void v1_generate_response(EngineState *state, const EngineCallbacks *cb, 
 
         if (think_line_words > 0) {
             think_line[think_wb] = '\0';
-            cb->chat_add_c(think_line, state->color_think);
-            cb->draw_chat();
-            cb->refresh_screen();
-            cb->sleep_with_scroll(40 + rand() % 120);
+            cb->stream_text("", think_line, state->color_think);
         }
 
-        state->self_ctx_len = think_ids_n < SELF_CTX_MAX ? think_ids_n : SELF_CTX_MAX;
-        if (state->self_ctx_len > 0)
-            memcpy(state->self_ctx_tokens, think_ids, state->self_ctx_len * sizeof(int));
+        append_v1_self_context(state, think_ids, think_ids_n);
         state->total_tokens += think_ids_n;
+        state->sampled_tokens += think_ids_n;
     }
 
-    user_match = knowledge_match_user(&know_extra, input);
-    if (!user_match) user_match = knowledge_match_user(&know_tech, input);
-    if (!user_match) user_match = knowledge_match_user(&know_general, input);
-    if (!user_match) user_match = knowledge_match_user(&know_phrases_en, input);
-    if (user_match && rand() % 100 < 80) {
+    if (cb->generation_should_stop()) {
+        free(word_buf);
+        cb->show_status("");
+        cb->curs_set_fn(1);
+        return;
+    }
+
+    user_match = NULL;
+    if (search_result_count > 0) {
+        snprintf(corpus_buf, sizeof(corpus_buf), "%s", search_text);
+        used_corpus = 1;
+        resp_mode = RESP_SEARCH_DRIFT;
+    } else {
+        user_match = knowledge_match_user(&know_extra, input);
+        if (!user_match) user_match = knowledge_match_user(&know_tech, input);
+        if (!user_match) user_match = knowledge_match_user(&know_general, input);
+        if (!user_match)
+            user_match = knowledge_match_user(&know_phrases_en, input);
+    }
+    if (search_result_count <= 0 && user_match && rand() % 100 < 80) {
         snprintf(corpus_buf, sizeof(corpus_buf), "%s", user_match);
         if (rand() % 100 < 40) {
-            scramble_words(corpus_buf, word_buf, sizeof(word_buf));
+            scramble_words(corpus_buf, word_buf, word_buf_size);
             snprintf(corpus_buf, sizeof(corpus_buf), "%s", word_buf);
         }
         used_corpus = 1;
-    } else {
+    } else if (search_result_count <= 0) {
+        restore_search_enabled = web_search_enabled();
+        if (!autonomous_search_allowed && restore_search_enabled)
+            web_search_set_enabled(0);
         used_corpus = generate_corpus_response(resp_mode, input, pattern, &feat, corpus_buf, sizeof(corpus_buf));
+        if (!autonomous_search_allowed && restore_search_enabled)
+            web_search_set_enabled(1);
     }
+
+    if (web_search_take_used())
+        cb->chat_add("Searched the web");
 
     if (used_corpus) {
         if (resp_mode != RESP_CODE_GEN) {
@@ -766,22 +879,25 @@ static void v1_generate_response(EngineState *state, const EngineCallbacks *cb, 
         }
 
         if (resp_mode != RESP_CODE_GEN && state->cfg_noise > NOISE_BASE * 1.5f) {
-            scramble_words(corpus_buf, word_buf, sizeof(word_buf));
+            scramble_words(corpus_buf, word_buf, word_buf_size);
             save_response(state, word_buf);
-            cb->chat_add_wrapped("TuffAI: ", word_buf, state->color_ai);
+            cb->stream_text("TuffAI: ", word_buf, state->color_ai);
         } else {
             save_response(state, corpus_buf);
-            cb->chat_add_wrapped("TuffAI: ", corpus_buf, state->color_ai);
+            cb->stream_text("TuffAI: ", corpus_buf, state->color_ai);
         }
+        free(word_buf);
         cb->show_status("");
         cb->curs_set_fn(1);
         return;
     }
 
-    cb->show_status("Generating...");
+    cb->show_status("Generating... ESC or Ctrl-C to stop.");
 
     wb_pos = 0;
     resp_ids_n = 0;
+    streamed_pos = 0;
+    generated_words = 0;
     for (step = 0; step < max_words; step++) {
         next_embed(ctx, prev_embed, feat_ctx, target);
         derail_embed(target, step, max_words);
@@ -801,13 +917,25 @@ static void v1_generate_response(EngineState *state, const EngineCallbacks *cb, 
         w = vocab[word];
         wlen = (int)strlen(w);
 
-        if (wb_pos > 0 && wb_pos + 1 + wlen < (int)sizeof(word_buf) - 2) {
+        if (wb_pos > 0 && wb_pos + 1 + wlen < word_buf_size - 2) {
             word_buf[wb_pos++] = ' ';
         }
-        if (wb_pos + wlen < (int)sizeof(word_buf) - 2) {
+        if (wb_pos + wlen < word_buf_size - 2) {
             memcpy(word_buf + wb_pos, w, wlen);
             wb_pos += wlen;
         }
+        generated_words++;
+
+        if (generated_words % 12 == 0) {
+            word_buf[wb_pos] = '\0';
+            stream_chunk = word_buf + streamed_pos;
+            while (*stream_chunk == ' ') stream_chunk++;
+            if (*stream_chunk)
+                cb->stream_text(streamed_pos == 0 ? "TuffAI: " : "",
+                                stream_chunk, state->color_ai);
+            streamed_pos = wb_pos;
+        }
+        if (cb->generation_should_stop()) break;
 
         memcpy(prev_embed, embeddings[word], EMBED_DIM * sizeof(float));
         prev_word = word;
@@ -817,44 +945,22 @@ static void v1_generate_response(EngineState *state, const EngineCallbacks *cb, 
     }
 
     (void)prev_word;
-    state->total_tokens += max_words;
+    state->total_tokens += generated_words;
+    state->sampled_tokens += generated_words;
 
     word_buf[wb_pos++] = '.';
     word_buf[wb_pos] = '\0';
 
-    inject_obsession(word_buf, sizeof(word_buf),
-                     state->obsession_word, state->obsession_strength);
-    inject_absorbed(word_buf, sizeof(word_buf),
-                    state->absorbed_words, state->absorbed_n);
-    inject_contradiction(word_buf, sizeof(word_buf),
-                         state->prev_responses, state->prev_resp_count);
-
-    unicode_chance = 15 + *state->hist_cnt * 3 + (int)(state->cfg_noise * 3.0f);
-    if (unicode_chance > 90) unicode_chance = 90;
-    if (rand() % 100 < unicode_chance) {
-        inject_unicode(word_buf, sizeof(word_buf));
-    }
-
     save_response(state, word_buf);
-    cb->chat_add_wrapped("TuffAI: ", word_buf, state->color_ai);
+    stream_chunk = word_buf + streamed_pos;
+    while (*stream_chunk == ' ') stream_chunk++;
+    if (*stream_chunk)
+        cb->stream_text(streamed_pos == 0 ? "TuffAI: " : "",
+                        stream_chunk, state->color_ai);
 
-    {
-        int combined;
-        int copy_len;
+    append_v1_self_context(state, resp_ids, resp_ids_n);
 
-        combined = state->self_ctx_len + resp_ids_n;
-        if (combined > SELF_CTX_MAX) {
-            copy_len = SELF_CTX_MAX - state->self_ctx_len;
-            if (copy_len < 0) copy_len = 0;
-        } else {
-            copy_len = resp_ids_n;
-        }
-        if (copy_len > 0) {
-            memcpy(state->self_ctx_tokens + state->self_ctx_len, resp_ids, copy_len * sizeof(int));
-            state->self_ctx_len += copy_len;
-        }
-    }
-
+    free(word_buf);
     cb->show_status("");
     cb->curs_set_fn(1);
 }
@@ -862,7 +968,7 @@ static void v1_generate_response(EngineState *state, const EngineCallbacks *cb, 
 const EngineVtable engine_tuffai_v1 = {
     v1_generate_response,
     1024,
-    65536,
+    V1_CONTEXT_TOKENS,
     ACTUAL_VOCAB,
     0
 };

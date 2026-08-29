@@ -1,15 +1,16 @@
 CC = cc
-CFLAGS = -Wall -Wextra -std=c99 -pedantic -O2 -msse
-LDFLAGS = -lm -lncurses -lcurl
+.DEFAULT_GOAL := all
+CFLAGS = -Wall -Wextra -std=c99 -pedantic -O2 -msse -MMD -MP
+LDFLAGS = -lm -lncursesw -lcurl
 SRCDIR = src
 BUILDDIR = build
 
 MODELS ?= v1,v2
 
-SRCS = $(SRCDIR)/main.c $(SRCDIR)/net.c $(SRCDIR)/features.c $(SRCDIR)/tokenizer.c $(SRCDIR)/wikifetch.c $(SRCDIR)/markov.c $(SRCDIR)/version.c
+SRCS = $(SRCDIR)/main.c $(SRCDIR)/net.c $(SRCDIR)/rng.c $(SRCDIR)/features.c $(SRCDIR)/tokenizer.c $(SRCDIR)/websearch.c $(SRCDIR)/markov.c $(SRCDIR)/version.c
 V1_DATA_SRCS = $(SRCDIR)/models/tuffai-v1/tech.c $(SRCDIR)/models/tuffai-v1/languages.c $(SRCDIR)/models/tuffai-v1/code.c $(SRCDIR)/models/tuffai-v1/general.c $(SRCDIR)/models/tuffai-v1/phrases.c $(SRCDIR)/models/tuffai-v1/vocab.c $(SRCDIR)/models/tuffai-v1/extra.c
 V1_ENGINE_SRCS = $(SRCDIR)/models/tuffai-v1/engine/engine.c $(SRCDIR)/models/tuffai-v1/engine/corpus.c
-V2_DATA_SRCS = $(SRCDIR)/models/tuffai-v2/tech.c $(SRCDIR)/models/tuffai-v2/languages.c $(SRCDIR)/models/tuffai-v2/code.c $(SRCDIR)/models/tuffai-v2/general.c $(SRCDIR)/models/tuffai-v2/phrases.c $(SRCDIR)/models/tuffai-v2/vocab.c $(SRCDIR)/models/tuffai-v2/extra.c $(SRCDIR)/models/tuffai-v2/opinions.c $(SRCDIR)/models/tuffai-v2/thinking.c $(SRCDIR)/models/tuffai-v2/wrongfacts.c
+V2_DATA_SRCS = $(SRCDIR)/models/tuffai-v2/tech.c $(SRCDIR)/models/tuffai-v2/languages.c $(SRCDIR)/models/tuffai-v2/code.c $(SRCDIR)/models/tuffai-v2/general.c $(SRCDIR)/models/tuffai-v2/phrases.c $(SRCDIR)/models/tuffai-v2/vocab.c $(SRCDIR)/models/tuffai-v2/extra.c $(SRCDIR)/models/tuffai-v2/opinions.c $(SRCDIR)/models/tuffai-v2/wrongfacts.c $(SRCDIR)/models/tuffai-v2/retrieval.c
 V2_ENGINE_SRCS = $(SRCDIR)/models/tuffai-v2/engine/engine.c $(SRCDIR)/models/tuffai-v2/engine/corpus.c
 OBJS = $(patsubst $(SRCDIR)/%.c,$(BUILDDIR)/%.o,$(SRCS))
 
@@ -33,7 +34,10 @@ BUILD_DIRS += $(BUILDDIR)/models/tuffai-v2/engine
 endif
 
 ALL_OBJS = $(OBJS) $(MODEL_OBJS)
+DEPS = $(ALL_OBJS:.o=.d)
 TARGET = tuffai
+
+-include $(DEPS)
 
 all: $(BUILDDIR) $(TARGET)
 

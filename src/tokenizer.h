@@ -4,6 +4,7 @@
 #include "knowledge/knowledge.h"
 
 int tokenize(const char *input, int *tokens, int max_tok);
+int v2_tokenize(const char *input, int *tokens, int max_tok);
 int detect_pattern(const char *input);
 void misidentify_topic(const char *input, char *out, int out_size);
 int detect_code_request(const char *input);

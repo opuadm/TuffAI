@@ -78,15 +78,6 @@ extern KnowledgeCategory v2_tangents;
 extern KnowledgeCategory v2_definitions;
 extern KnowledgeCategory v2_accidental_truths;
 
-extern const char *v2_think_connectors[];
-extern const int v2_think_connectors_n;
-extern const char *v2_think_fillers[];
-extern const int v2_think_fillers_n;
-extern const char *v2_knowledge_intros[];
-extern const int v2_knowledge_intros_n;
-extern const char *v2_opinion_think_phrases[];
-extern const int v2_opinion_think_phrases_n;
-
 extern const char *v2_wrong_math_templates[];
 extern const int v2_wrong_math_templates_n;
 extern const char *v2_emotional_responses[];

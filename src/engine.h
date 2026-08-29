@@ -12,8 +12,11 @@
 #define ABSORBED_MAX 32
 #define PREV_RESPONSE_MAX 8
 #define PREV_RESPONSE_LEN 512
-#define SELF_CTX_MAX 256
+#define SELF_CTX_MAX 4096
 #define SYSTEM_PROMPT_MAX 2048
+#define RENDERED_RECENT_MAX 128
+#define RENDERED_WORD_LEN 48
+#define RECENT_CODEPOINT_MAX 256
 
 typedef struct {
     void (*chat_add)(const char *line);
@@ -21,9 +24,10 @@ typedef struct {
     void (*chat_add_wrapped)(const char *prefix, const char *text, int color);
     void (*draw_chat)(void);
     void (*show_status)(const char *msg);
-    void (*sleep_with_scroll)(int ms);
     void (*refresh_screen)(void);
     void (*curs_set_fn)(int visibility);
+    int (*generation_should_stop)(void);
+    void (*stream_text)(const char *prefix, const char *text, int color);
 } EngineCallbacks;
 
 typedef struct {
@@ -44,7 +48,14 @@ typedef struct {
     int self_ctx_len;
 
     int total_tokens;
+    long sampled_tokens;
+    float last_tokens_per_second;
     int turn_count;
+
+    char recent_rendered[RENDERED_RECENT_MAX][RENDERED_WORD_LEN];
+    int recent_rendered_count;
+    unsigned int recent_codepoints[RECENT_CODEPOINT_MAX];
+    int recent_codepoint_count;
 
     float cfg_temp;
     float cfg_noise;

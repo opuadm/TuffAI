@@ -1,5 +1,5 @@
 #include "../../../corpus.h"
-#include "../../../wikifetch.h"
+#include "../../../websearch.h"
 #include "../../../markov.h"
 #include "../../../knowledge/knowledge.h"
 #include <stdio.h>
@@ -169,21 +169,21 @@ void scramble_words(const char *input, char *out, int out_size) {
     out[written] = '\0';
 }
 
-static void gen_wiki_confused(const char *input, char *out, int out_size) {
+static void gen_search_confused(const char *input, char *out, int out_size) {
     char confused_term[128];
-    char wiki_text[4096];
+    char search_text[4096];
     int got;
 
     confused_term[0] = '\0';
     misidentify_topic(input, confused_term, sizeof(confused_term));
 
-    got = wiki_fetch_search(confused_term, wiki_text, sizeof(wiki_text));
+    got = web_fetch_search(confused_term, search_text, sizeof(search_text));
     if (!got) {
-        got = wiki_fetch_random(wiki_text, sizeof(wiki_text));
+        got = web_fetch_random(search_text, sizeof(search_text));
     }
 
     if (got) {
-        snprintf(out, out_size, "%s", wiki_text);
+        snprintf(out, out_size, "%s", search_text);
     } else {
         snprintf(out, out_size, "%s?", confused_term);
     }
@@ -191,7 +191,7 @@ static void gen_wiki_confused(const char *input, char *out, int out_size) {
 
 static void gen_echo_keyword(const char *input, char *out, int out_size) {
     char keyword[128];
-    char wiki_text[4096];
+    char search_text[4096];
     int written;
     int got;
 
@@ -199,25 +199,25 @@ static void gen_echo_keyword(const char *input, char *out, int out_size) {
 
     written = snprintf(out, out_size, "%s?\n\n", keyword);
 
-    got = wiki_fetch_search(keyword, wiki_text, sizeof(wiki_text));
+    got = web_fetch_search(keyword, search_text, sizeof(search_text));
     if (!got) {
-        got = wiki_fetch_random(wiki_text, sizeof(wiki_text));
+        got = web_fetch_random(search_text, sizeof(search_text));
     }
     if (got && written < out_size - 10) {
-        snprintf(out + written, out_size - written, "%s", wiki_text);
+        snprintf(out + written, out_size - written, "%s", search_text);
     }
 }
 
-static void gen_wiki_drift(const char *input, char *out, int out_size) {
-    char wiki1[4096];
-    char wiki2[4096];
+static void gen_search_drift(const char *input, char *out, int out_size) {
+    char search1[4096];
+    char search2[4096];
     int written;
     int got1, got2;
     int split_point;
     int len1;
 
-    got1 = wiki_fetch_search(input, wiki1, sizeof(wiki1));
-    got2 = wiki_fetch_random(wiki2, sizeof(wiki2));
+    got1 = web_fetch_search(input, search1, sizeof(search1));
+    got2 = web_fetch_random(search2, sizeof(search2));
 
     if (!got1 && !got2) {
         snprintf(out, out_size, "%s?", input);
@@ -225,15 +225,15 @@ static void gen_wiki_drift(const char *input, char *out, int out_size) {
     }
 
     if (got1) {
-        len1 = (int)strlen(wiki1);
+        len1 = (int)strlen(search1);
         split_point = len1 / 3 + rand() % (len1 / 3 + 1);
-        while (split_point < len1 && wiki1[split_point] != ' ') split_point++;
+        while (split_point < len1 && search1[split_point] != ' ') split_point++;
         if (split_point >= len1) split_point = len1 / 2;
-        wiki1[split_point] = '\0';
+        search1[split_point] = '\0';
 
-        written = snprintf(out, out_size, "%s", wiki1);
+        written = snprintf(out, out_size, "%s", search1);
     } else {
-        written = snprintf(out, out_size, "%s", wiki2);
+        written = snprintf(out, out_size, "%s", search2);
         got2 = 0;
     }
     if (written >= out_size) written = out_size - 1;
@@ -258,14 +258,14 @@ static void gen_wiki_drift(const char *input, char *out, int out_size) {
     }
 
     if (got2 && written < out_size - 10) {
-        snprintf(out + written, out_size - written, "%s", wiki2);
+        snprintf(out + written, out_size - written, "%s", search2);
     }
 }
 
 static void gen_confusion(const char *input, char *out, int out_size) {
     int style;
     char confused_term[128];
-    char wiki_text[4096];
+    char search_text[4096];
     int written;
     int got;
 
@@ -278,18 +278,18 @@ static void gen_confusion(const char *input, char *out, int out_size) {
         break;
     case 1:
         misidentify_topic(input, confused_term, sizeof(confused_term));
-        got = wiki_fetch_search(confused_term, wiki_text, sizeof(wiki_text));
+        got = web_fetch_search(confused_term, search_text, sizeof(search_text));
         if (got) {
-            written = snprintf(out, out_size, "%s?\n\n%s", confused_term, wiki_text);
+            written = snprintf(out, out_size, "%s?\n\n%s", confused_term, search_text);
             (void)written;
         } else {
             snprintf(out, out_size, "%s?", confused_term);
         }
         break;
     case 2:
-        got = wiki_fetch_random(wiki_text, sizeof(wiki_text));
+        got = web_fetch_random(search_text, sizeof(search_text));
         if (got) {
-            snprintf(out, out_size, "%s", wiki_text);
+            snprintf(out, out_size, "%s", search_text);
         } else {
             snprintf(out, out_size, "That's not what I understand.");
         }
@@ -307,9 +307,9 @@ static void gen_confusion(const char *input, char *out, int out_size) {
     }
 }
 
-static void gen_wiki_mangle(const char *input, char *out, int out_size) {
-    char wiki1[4096];
-    char wiki2[4096];
+static void gen_search_mangle(const char *input, char *out, int out_size) {
+    char search1[4096];
+    char search2[4096];
     char keyword[128];
     int got1, got2;
     int written;
@@ -318,8 +318,8 @@ static void gen_wiki_mangle(const char *input, char *out, int out_size) {
 
     extract_keyword_ext(input, keyword, sizeof(keyword));
 
-    got1 = wiki_fetch_search(keyword, wiki1, sizeof(wiki1));
-    got2 = wiki_fetch_random(wiki2, sizeof(wiki2));
+    got1 = web_fetch_search(keyword, search1, sizeof(search1));
+    got2 = web_fetch_random(search2, sizeof(search2));
 
     if (!got1 && !got2) {
         snprintf(out, out_size, "%s?", keyword);
@@ -327,22 +327,22 @@ static void gen_wiki_mangle(const char *input, char *out, int out_size) {
     }
 
     if (got1 && got2) {
-        len1 = (int)strlen(wiki1);
-        len2 = (int)strlen(wiki2);
+        len1 = (int)strlen(search1);
+        len2 = (int)strlen(search2);
         cut1 = len1 / 2 + rand() % (len1 / 4 + 1);
-        while (cut1 < len1 && wiki1[cut1] != ' ') cut1++;
+        while (cut1 < len1 && search1[cut1] != ' ') cut1++;
         if (cut1 >= len1) cut1 = len1 / 2;
-        wiki1[cut1] = '\0';
+        search1[cut1] = '\0';
 
         cut2 = rand() % (len2 / 3 + 1);
-        while (cut2 < len2 && wiki2[cut2] != ' ') cut2++;
+        while (cut2 < len2 && search2[cut2] != ' ') cut2++;
 
-        written = snprintf(out, out_size, "%s %s", wiki1, wiki2 + cut2);
+        written = snprintf(out, out_size, "%s %s", search1, search2 + cut2);
         (void)written;
     } else if (got1) {
-        snprintf(out, out_size, "%s", wiki1);
+        snprintf(out, out_size, "%s", search1);
     } else {
-        snprintf(out, out_size, "%s", wiki2);
+        snprintf(out, out_size, "%s", search2);
     }
 }
 
@@ -406,27 +406,27 @@ static void gen_single_word(const char *input, char *out, int out_size) {
 }
 
 static void gen_truncate(const char *input, char *out, int out_size) {
-    char wiki_text[4096];
+    char search_text[4096];
     int got;
     int len;
     int cut;
 
-    got = wiki_fetch_search(input, wiki_text, sizeof(wiki_text));
+    got = web_fetch_search(input, search_text, sizeof(search_text));
     if (!got) {
-        got = wiki_fetch_random(wiki_text, sizeof(wiki_text));
+        got = web_fetch_random(search_text, sizeof(search_text));
     }
     if (!got) {
         snprintf(out, out_size, "I--");
         return;
     }
 
-    len = (int)strlen(wiki_text);
+    len = (int)strlen(search_text);
     cut = 20 + rand() % (len / 3 + 1);
     if (cut >= len) cut = len / 2;
-    while (cut > 0 && wiki_text[cut] != ' ') cut--;
+    while (cut > 0 && search_text[cut] != ' ') cut--;
     if (cut <= 0 || cut >= len) cut = len > 20 ? 20 : len;
-    wiki_text[cut] = '\0';
-    snprintf(out, out_size, "%s--", wiki_text);
+    search_text[cut] = '\0';
+    snprintf(out, out_size, "%s--", search_text);
 }
 
 static void gen_repeat(const char *input, char *out, int out_size) {
@@ -455,7 +455,7 @@ static void gen_code(const char *input, char *out, int out_size) {
     const char *snippet;
     const char *snippet2;
     char keyword[128];
-    char wiki_text[4096];
+    char search_text[4096];
     int got;
     int written;
     int style;
@@ -482,20 +482,20 @@ static void gen_code(const char *input, char *out, int out_size) {
         written = snprintf(out, out_size, "%s?\n\n%s", keyword, snippet);
         (void)written;
     } else if (style == 6) {
-        got = wiki_fetch_search(input, wiki_text, sizeof(wiki_text));
+        got = web_fetch_search(input, search_text, sizeof(search_text));
         if (got) {
-            int cut = (int)strlen(wiki_text) / 3;
-            wiki_text[cut] = '\0';
-            written = snprintf(out, out_size, "%s\n\n%s", wiki_text, snippet);
+            int cut = (int)strlen(search_text) / 3;
+            search_text[cut] = '\0';
+            written = snprintf(out, out_size, "%s\n\n%s", search_text, snippet);
             (void)written;
         } else {
             snprintf(out, out_size, "%s", snippet);
         }
     } else if (style == 7) {
         written = snprintf(out, out_size, "%s\n\n", snippet);
-        got = wiki_fetch_random(wiki_text, sizeof(wiki_text));
+        got = web_fetch_random(search_text, sizeof(search_text));
         if (got && written < out_size - 10) {
-            snprintf(out + written, out_size - written, "%s", wiki_text);
+            snprintf(out + written, out_size - written, "%s", search_text);
         }
     } else {
         switch (code_lang) {
@@ -512,7 +512,7 @@ static void gen_code(const char *input, char *out, int out_size) {
 
 static void gen_multilang(const char *input, char *out, int out_size) {
     const char *phrase;
-    char wiki_text[4096];
+    char search_text[4096];
     int lang_hint;
     int got;
     int written;
@@ -526,44 +526,44 @@ static void gen_multilang(const char *input, char *out, int out_size) {
         snprintf(out, out_size, "%s", phrase);
     } else if (style == 2 && lang_hint == 1) {
         phrase = knowledge_random(&know_phrases_pl);
-        got = wiki_fetch_search_lang(input, WIKI_LANG_PL, wiki_text, sizeof(wiki_text));
+        got = web_fetch_search_lang(input, SEARCH_LANG_PL, search_text, sizeof(search_text));
         if (got) {
-            written = snprintf(out, out_size, "%s\n\n%s", phrase, wiki_text);
+            written = snprintf(out, out_size, "%s\n\n%s", phrase, search_text);
             (void)written;
         } else {
             snprintf(out, out_size, "%s", phrase);
         }
     } else if (style == 2 && lang_hint == 2) {
         phrase = knowledge_random(&know_phrases_ru);
-        got = wiki_fetch_search_lang(input, WIKI_LANG_RU, wiki_text, sizeof(wiki_text));
+        got = web_fetch_search_lang(input, SEARCH_LANG_RU, search_text, sizeof(search_text));
         if (got) {
-            written = snprintf(out, out_size, "%s\n\n%s", phrase, wiki_text);
+            written = snprintf(out, out_size, "%s\n\n%s", phrase, search_text);
             (void)written;
         } else {
             snprintf(out, out_size, "%s", phrase);
         }
     } else if (style == 2 && lang_hint == 3) {
         phrase = knowledge_random(&know_phrases_zh);
-        got = wiki_fetch_search_lang(input, WIKI_LANG_ZH, wiki_text, sizeof(wiki_text));
+        got = web_fetch_search_lang(input, SEARCH_LANG_ZH, search_text, sizeof(search_text));
         if (got) {
-            written = snprintf(out, out_size, "%s\n\n%s", phrase, wiki_text);
+            written = snprintf(out, out_size, "%s\n\n%s", phrase, search_text);
             (void)written;
         } else {
             snprintf(out, out_size, "%s", phrase);
         }
     } else if (style == 3) {
-        got = wiki_fetch_random_any_lang(wiki_text, sizeof(wiki_text));
+        got = web_fetch_random_any_lang(search_text, sizeof(search_text));
         if (got) {
             phrase = knowledge_random_phrase();
-            written = snprintf(out, out_size, "%s\n\n%s", phrase, wiki_text);
+            written = snprintf(out, out_size, "%s\n\n%s", phrase, search_text);
             (void)written;
         } else {
             snprintf(out, out_size, "%s", knowledge_random_phrase());
         }
     } else {
-        got = wiki_fetch_random_any_lang(wiki_text, sizeof(wiki_text));
+        got = web_fetch_random_any_lang(search_text, sizeof(search_text));
         if (got) {
-            snprintf(out, out_size, "%s", wiki_text);
+            snprintf(out, out_size, "%s", search_text);
         } else {
             snprintf(out, out_size, "%s", knowledge_random_phrase());
         }
@@ -573,7 +573,7 @@ static void gen_multilang(const char *input, char *out, int out_size) {
 static void gen_knowledge(const char *input, char *out, int out_size) {
     char keyword[128];
     const char *entry;
-    char wiki_text[4096];
+    char search_text[4096];
     int got;
     int written;
     int style;
@@ -595,12 +595,12 @@ static void gen_knowledge(const char *input, char *out, int out_size) {
         (void)written;
     } else if (style == 3) {
         entry = knowledge_random_any();
-        got = wiki_fetch_search(input, wiki_text, sizeof(wiki_text));
+        got = web_fetch_search(input, search_text, sizeof(search_text));
         if (got) {
-            int cut = (int)strlen(wiki_text) / 2;
-            while (cut > 0 && wiki_text[cut] != ' ') cut--;
-            if (cut > 0) wiki_text[cut] = '\0';
-            written = snprintf(out, out_size, "%s %s", wiki_text, entry);
+            int cut = (int)strlen(search_text) / 2;
+            while (cut > 0 && search_text[cut] != ' ') cut--;
+            if (cut > 0) search_text[cut] = '\0';
+            written = snprintf(out, out_size, "%s %s", search_text, entry);
             (void)written;
         } else {
             snprintf(out, out_size, "%s", entry);
@@ -611,15 +611,15 @@ static void gen_knowledge(const char *input, char *out, int out_size) {
         } else {
             entry = knowledge_random(&know_general);
         }
-        got = wiki_fetch_random(wiki_text, sizeof(wiki_text));
+        got = web_fetch_random(search_text, sizeof(search_text));
         if (got) {
             int cut = 50 + rand() % 200;
-            int wlen = (int)strlen(wiki_text);
+            int wlen = (int)strlen(search_text);
             if (cut < wlen) {
-                while (cut < wlen && wiki_text[cut] != ' ') cut++;
-                wiki_text[cut] = '\0';
+                while (cut < wlen && search_text[cut] != ' ') cut++;
+                search_text[cut] = '\0';
             }
-            written = snprintf(out, out_size, "%s\n\n%s", entry, wiki_text);
+            written = snprintf(out, out_size, "%s\n\n%s", entry, search_text);
             (void)written;
         } else {
             snprintf(out, out_size, "%s", entry);
@@ -627,28 +627,28 @@ static void gen_knowledge(const char *input, char *out, int out_size) {
     }
 }
 
-static void gen_wiki_foreign(const char *input, char *out, int out_size) {
-    char wiki_text[4096];
+static void gen_search_foreign(const char *input, char *out, int out_size) {
+    char search_text[4096];
     const char *phrase;
     int lang;
     int got;
     int written;
 
-    lang = rand() % WIKI_LANG_COUNT;
-    if (lang == WIKI_LANG_EN && rand() % 2 == 0) lang = WIKI_LANG_PL;
+    lang = rand() % SEARCH_LANG_COUNT;
+    if (lang == SEARCH_LANG_EN && rand() % 2 == 0) lang = SEARCH_LANG_PL;
 
-    got = wiki_fetch_search_lang(input, lang, wiki_text, sizeof(wiki_text));
+    got = web_fetch_search_lang(input, lang, search_text, sizeof(search_text));
     if (!got) {
-        got = wiki_fetch_random_lang(lang, wiki_text, sizeof(wiki_text));
+        got = web_fetch_random_lang(lang, search_text, sizeof(search_text));
     }
 
     if (got) {
         if (rand() % 3 == 0) {
             phrase = knowledge_random_phrase();
-            written = snprintf(out, out_size, "%s\n\n%s", phrase, wiki_text);
+            written = snprintf(out, out_size, "%s\n\n%s", phrase, search_text);
             (void)written;
         } else {
-            snprintf(out, out_size, "%s", wiki_text);
+            snprintf(out, out_size, "%s", search_text);
         }
     } else {
         snprintf(out, out_size, "%s", knowledge_random_phrase());
@@ -668,20 +668,20 @@ int pick_response_mode(int pattern, const Features *feat, int turn_count) {
     if (pattern == PAT_CODE) {
         if (r < 70) return RESP_CODE_GEN;
         if (r < 80) return RESP_KNOWLEDGE;
-        if (r < 88) return RESP_WIKI_CONFUSED;
+        if (r < 88) return RESP_SEARCH_CONFUSED;
         if (r < 94) return RESP_ECHO_KEYWORD;
         return RESP_CONFUSION;
     }
 
     if (pattern == PAT_LANGUAGE) {
         if (r < 50) return RESP_MULTILANG;
-        if (r < 70) return RESP_WIKI_FOREIGN;
+        if (r < 70) return RESP_SEARCH_FOREIGN;
         if (r < 82) return RESP_KNOWLEDGE;
-        if (r < 90) return RESP_WIKI_CONFUSED;
+        if (r < 90) return RESP_SEARCH_CONFUSED;
         return RESP_CONFUSION;
     }
 
-    if (r2 < 3 + unhinged / 3) return RESP_WIKI_FOREIGN;
+    if (r2 < 3 + unhinged / 3) return RESP_SEARCH_FOREIGN;
     if (r2 < 5 + unhinged / 2) return RESP_WORD_SALAD;
     if (r2 < 7) return RESP_KNOWLEDGE;
     if (r2 < 9) return RESP_MULTILANG;
@@ -690,36 +690,36 @@ int pick_response_mode(int pattern, const Features *feat, int turn_count) {
     if (rand() % 100 < 2) return RESP_TRUNCATE;
     if (rand() % 100 < 2) return RESP_REPEAT;
 
-    if (rand() % 100 < 3 + unhinged / 2) return RESP_WIKI_DRIFT;
+    if (rand() % 100 < 3 + unhinged / 2) return RESP_SEARCH_DRIFT;
     if (rand() % 100 < 2 + unhinged / 3) return RESP_MARKOV;
 
     if (pattern == PAT_NEWS) {
-        if (r < 30) return RESP_WIKI_CONFUSED;
-        if (r < 50) return RESP_WIKI_FOREIGN;
+        if (r < 30) return RESP_SEARCH_CONFUSED;
+        if (r < 50) return RESP_SEARCH_FOREIGN;
         if (r < 65) return RESP_KNOWLEDGE;
-        if (r < 80) return RESP_WIKI_DRIFT;
+        if (r < 80) return RESP_SEARCH_DRIFT;
         if (r < 90) return RESP_MULTILANG;
         return RESP_ECHO_KEYWORD;
     }
 
     if (pattern == PAT_CREATIVE) {
         if (r < 25) return RESP_CODE_GEN;
-        if (r < 45) return RESP_WIKI_DRIFT;
+        if (r < 45) return RESP_SEARCH_DRIFT;
         if (r < 60) return RESP_MULTILANG;
         if (r < 75) return RESP_KNOWLEDGE;
-        if (r < 85) return RESP_WIKI_MANGLE;
+        if (r < 85) return RESP_SEARCH_MANGLE;
         return RESP_MARKOV;
     }
 
     if (pattern == PAT_MATH || pattern == PAT_TECH) {
-        if (r < 20) return RESP_WIKI_CONFUSED;
+        if (r < 20) return RESP_SEARCH_CONFUSED;
         if (r < 35) return RESP_KNOWLEDGE;
-        if (r < 50) return RESP_WIKI_MANGLE;
+        if (r < 50) return RESP_SEARCH_MANGLE;
         if (r < 60) return RESP_CODE_GEN;
         if (r < 72) return RESP_ECHO_KEYWORD;
-        if (r < 82) return RESP_WIKI_DRIFT;
+        if (r < 82) return RESP_SEARCH_DRIFT;
         if (r < 90) return RESP_CONFUSION;
-        if (r < 95) return RESP_WIKI_FOREIGN;
+        if (r < 95) return RESP_SEARCH_FOREIGN;
         return RESP_MARKOV;
     }
 
@@ -727,51 +727,51 @@ int pick_response_mode(int pattern, const Features *feat, int turn_count) {
         if (r < 20) return RESP_ECHO_MANGLE;
         if (r < 35) return RESP_MULTILANG;
         if (r < 50) return RESP_ECHO_KEYWORD;
-        if (r < 65) return RESP_WIKI_CONFUSED;
+        if (r < 65) return RESP_SEARCH_CONFUSED;
         if (r < 75) return RESP_KNOWLEDGE;
         if (r < 85) return RESP_CONFUSION;
-        return RESP_WIKI_FOREIGN;
+        return RESP_SEARCH_FOREIGN;
     }
 
     if (pattern == PAT_QUESTION || pattern == PAT_TIME) {
-        if (r < 18) return RESP_WIKI_CONFUSED;
+        if (r < 18) return RESP_SEARCH_CONFUSED;
         if (r < 30) return RESP_KNOWLEDGE;
         if (r < 42) return RESP_ECHO_KEYWORD;
-        if (r < 54) return RESP_WIKI_DRIFT;
-        if (r < 66) return RESP_WIKI_MANGLE;
+        if (r < 54) return RESP_SEARCH_DRIFT;
+        if (r < 66) return RESP_SEARCH_MANGLE;
         if (r < 76) return RESP_MULTILANG;
         if (r < 84) return RESP_CONFUSION;
         if (r < 92) return RESP_MARKOV;
-        return RESP_WIKI_FOREIGN;
+        return RESP_SEARCH_FOREIGN;
     }
 
     if (pattern == PAT_EMOTIONAL) {
         if (r < 25) return RESP_CONFUSION;
         if (r < 40) return RESP_MULTILANG;
-        if (r < 55) return RESP_WIKI_CONFUSED;
+        if (r < 55) return RESP_SEARCH_CONFUSED;
         if (r < 70) return RESP_KNOWLEDGE;
         if (r < 82) return RESP_ECHO_KEYWORD;
-        return RESP_WIKI_DRIFT;
+        return RESP_SEARCH_DRIFT;
     }
 
     if (feat->word_count < 0.1f) {
         if (r < 25) return RESP_ECHO_KEYWORD;
-        if (r < 40) return RESP_WIKI_CONFUSED;
+        if (r < 40) return RESP_SEARCH_CONFUSED;
         if (r < 55) return RESP_MULTILANG;
         if (r < 70) return RESP_KNOWLEDGE;
         if (r < 80) return RESP_CONFUSION;
         return RESP_ECHO_MANGLE;
     }
 
-    if (r < 12) return RESP_WIKI_CONFUSED;
+    if (r < 12) return RESP_SEARCH_CONFUSED;
     if (r < 22) return RESP_KNOWLEDGE;
     if (r < 32) return RESP_ECHO_KEYWORD;
-    if (r < 42) return RESP_WIKI_DRIFT;
-    if (r < 52) return RESP_WIKI_MANGLE;
+    if (r < 42) return RESP_SEARCH_DRIFT;
+    if (r < 52) return RESP_SEARCH_MANGLE;
     if (r < 60) return RESP_MULTILANG;
     if (r < 68) return RESP_CONFUSION;
     if (r < 76) return RESP_MARKOV;
-    if (r < 84) return RESP_WIKI_FOREIGN;
+    if (r < 84) return RESP_SEARCH_FOREIGN;
     if (r < 90) return RESP_CODE_GEN;
     return RESP_ECHO_MANGLE;
 }
@@ -783,29 +783,29 @@ int generate_corpus_response(int mode, const char *input, int pattern, const Fea
     out[0] = '\0';
 
     switch (mode) {
-    case RESP_WIKI_CONFUSED:
-        gen_wiki_confused(input, out, out_size);
+    case RESP_SEARCH_CONFUSED:
+        gen_search_confused(input, out, out_size);
         return 1;
 
     case RESP_ECHO_KEYWORD:
         gen_echo_keyword(input, out, out_size);
         return 1;
 
-    case RESP_WIKI_DRIFT:
-        gen_wiki_drift(input, out, out_size);
+    case RESP_SEARCH_DRIFT:
+        gen_search_drift(input, out, out_size);
         return 1;
 
     case RESP_CONFUSION:
         gen_confusion(input, out, out_size);
         return 1;
 
-    case RESP_WIKI_MANGLE:
-        gen_wiki_mangle(input, out, out_size);
+    case RESP_SEARCH_MANGLE:
+        gen_search_mangle(input, out, out_size);
         return 1;
 
     case RESP_MARKOV:
         if (markov_generate(input, out, out_size, 60 + rand() % 120)) return 1;
-        gen_wiki_confused(input, out, out_size);
+        gen_search_confused(input, out, out_size);
         return 1;
 
     case RESP_ECHO_MANGLE:
@@ -836,8 +836,8 @@ int generate_corpus_response(int mode, const char *input, int pattern, const Fea
         gen_knowledge(input, out, out_size);
         return 1;
 
-    case RESP_WIKI_FOREIGN:
-        gen_wiki_foreign(input, out, out_size);
+    case RESP_SEARCH_FOREIGN:
+        gen_search_foreign(input, out, out_size);
         return 1;
 
     case RESP_WORD_SALAD:
