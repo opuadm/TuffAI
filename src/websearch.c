@@ -445,7 +445,7 @@ static int clean_page_text(const char *page, char *output, int output_size) {
 }
 
 static float score_result(const char *query, const SearchResult *result,
-                          int use_v2_model) {
+                          int tokenizer_version) {
     Features features;
     float feature_context[EMBED_DIM];
     char metadata[2048];
@@ -460,13 +460,17 @@ static float score_result(const char *query, const SearchResult *result,
     feat_to_embed(&features, feature_context);
     snprintf(metadata, sizeof(metadata), "%.511s %.1535s", result->title,
              result->description);
-#ifdef ENABLE_TUFFAI_V2
-    token_count = use_v2_model ?
-                  v2_tokenize(metadata, tokens, MAX_TOKENS) :
-                  tokenize(metadata, tokens, MAX_TOKENS);
-#else
-    (void)use_v2_model;
     token_count = tokenize(metadata, tokens, MAX_TOKENS);
+#ifdef ENABLE_TUFFAI_V2
+    if (tokenizer_version == 1)
+        token_count = v2_tokenize(metadata, tokens, MAX_TOKENS);
+#endif
+#ifdef ENABLE_TUFFAI_V3
+    if (tokenizer_version == 2)
+        token_count = v3_tokenize(metadata, tokens, MAX_TOKENS);
+#endif
+#if !defined(ENABLE_TUFFAI_V2) && !defined(ENABLE_TUFFAI_V3)
+    (void)tokenizer_version;
 #endif
     score = 0.0f;
     for (i = 0; i < token_count; i++) {
@@ -481,7 +485,7 @@ static float score_result(const char *query, const SearchResult *result,
 }
 
 int web_research(const char *query, char *output, int output_size,
-                 int use_v2_model) {
+                 int tokenizer_version) {
     SearchBuffer response;
     SearchBuffer page;
     SearchResult results[SEARCH_RESULT_LIMIT];
@@ -518,7 +522,7 @@ int web_research(const char *query, char *output, int output_size,
     }
     if (result_count <= 0) return 0;
     for (i = 0; i < result_count; i++)
-        scores[i] = score_result(selected_query, &results[i], use_v2_model);
+        scores[i] = score_result(selected_query, &results[i], tokenizer_version);
     desired_pages = 1;
     if (result_count > 1 && rng_range(100) < 55) desired_pages = 2;
     chosen_count = result_count;

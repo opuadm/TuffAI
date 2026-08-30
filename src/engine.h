@@ -12,7 +12,7 @@
 #define ABSORBED_MAX 32
 #define PREV_RESPONSE_MAX 8
 #define PREV_RESPONSE_LEN 512
-#define SELF_CTX_MAX 4096
+#define SELF_CTX_MAX 32768
 #define SYSTEM_PROMPT_MAX 2048
 #define RENDERED_RECENT_MAX 128
 #define RENDERED_WORD_LEN 48
@@ -28,6 +28,7 @@ typedef struct {
     void (*curs_set_fn)(int visibility);
     int (*generation_should_stop)(void);
     void (*stream_text)(const char *prefix, const char *text, int color);
+    void (*use_tool)(const char *name, const char *input);
 } EngineCallbacks;
 
 typedef struct {
@@ -49,8 +50,19 @@ typedef struct {
 
     int total_tokens;
     long sampled_tokens;
+    long visible_tokens;
     float last_tokens_per_second;
     int turn_count;
+    char *last_thinking;
+    size_t last_thinking_capacity;
+    char *last_response;
+    size_t last_response_capacity;
+    char *last_response_before_tool;
+    size_t last_response_before_tool_capacity;
+    char *last_tool;
+    size_t last_tool_capacity;
+    char *last_tool_input;
+    size_t last_tool_input_capacity;
 
     char recent_rendered[RENDERED_RECENT_MAX][RENDERED_WORD_LEN];
     int recent_rendered_count;
@@ -64,6 +76,7 @@ typedef struct {
     float cfg_top_p;
     float cfg_presence_penalty;
     int cfg_max_words;
+    int effort_mode;
 
     char (*hist_buf)[HIST_LEN];
     int (*hist_tokens)[MAX_TOKENS];
@@ -82,6 +95,10 @@ typedef struct {
     int context_window;
     int vocab_size;
     int has_system_prompt;
+    const char *const *effort_modes;
+    int effort_mode_count;
+    int default_effort_mode;
+    int has_code_mode;
 } EngineVtable;
 
 #ifdef ENABLE_TUFFAI_V1
@@ -89,6 +106,9 @@ extern const EngineVtable engine_tuffai_v1;
 #endif
 #ifdef ENABLE_TUFFAI_V2
 extern const EngineVtable engine_tuffai_v2;
+#endif
+#ifdef ENABLE_TUFFAI_V3
+extern const EngineVtable engine_tuffai_v3;
 #endif
 
 #endif

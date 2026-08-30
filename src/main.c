@@ -20,6 +20,9 @@
 #include "websearch.h"
 #include "version.h"
 #include "engine.h"
+#ifdef ENABLE_TUFFAI_V3
+#include "models/tuffai-v3/code_mode.h"
+#endif
 
 #define INPUT_MAX 512
 #define CHAT_LINES 4096
@@ -30,6 +33,8 @@
 #define COLOR_THINK 3
 #define COLOR_STATUS 4
 #define COLOR_CMD 5
+#define COLOR_SHADOW 6
+#define COLOR_SELECTED 7
 
 static char chat_log[CHAT_LINES][CHAT_LINE_LEN];
 static int chat_colors[CHAT_LINES];
@@ -39,6 +44,7 @@ static volatile int got_sigwinch = 0;
 static volatile int got_sigint = 0;
 static int generation_stop_requested = 0;
 static int train_mode = 0;
+static int code_mode = 0;
 
 static void draw_chat(void);
 
@@ -55,6 +61,8 @@ static const SlashCmd slash_cmds[] = {
     {"/topp", "top-p sampling"},
     {"/presence", "presence penalty"},
     {"/maxwords", "max response words"},
+    {"/effort", "set reasoning effort"},
+    {"/code", "toggle code mode"},
     {"/model", "switch model"},
     {"/prompt", "edit system prompt"},
     {"/search", "toggle web search"},
@@ -174,10 +182,23 @@ typedef struct {
 } ModelDef;
 
 static const ModelDef models[] = {
+#ifdef ENABLE_TUFFAI_V3
+    {
+        "TuffAI-v3",
+        "Clearer multilingual dataset model",
+        1.15f,
+        0.65f,
+        0.65f,
+        1.25f,
+        0.9f,
+        0.3f,
+        &engine_tuffai_v3,
+    },
+#endif
 #ifdef ENABLE_TUFFAI_V2
     {
         "TuffAI-v2",
-        "Latest TuffAI Version",
+        "Stable previous-generation model",
         1.35f,
         0.9f,
         0.8f,
@@ -205,6 +226,31 @@ static const ModelDef models[] = {
 #define MODEL_COUNT (int)(sizeof(models) / sizeof(models[0]))
 
 static int current_model = 0;
+
+static int current_model_supports_effort(void) {
+    return models[current_model].engine->effort_modes != NULL &&
+           models[current_model].engine->effort_mode_count > 0;
+}
+
+static int current_model_supports_code_mode(void) {
+    return models[current_model].engine->has_code_mode;
+}
+
+static void draw_box_shadow(int box_y, int box_x, int box_h, int box_w,
+                            int rows, int cols) {
+    int i;
+
+    attron(COLOR_PAIR(COLOR_SHADOW));
+    if (box_x + box_w < cols) {
+        for (i = 1; i <= box_h && box_y + i < rows; i++)
+            mvaddch(box_y + i, box_x + box_w, ACS_CKBOARD);
+    }
+    if (box_y + box_h < rows) {
+        for (i = 1; i <= box_w && box_x + i < cols; i++)
+            mvaddch(box_y + box_h, box_x + i, ACS_CKBOARD);
+    }
+    attroff(COLOR_PAIR(COLOR_SHADOW));
+}
 
 static void chat_add(const char *line) {
     int slot;
@@ -316,9 +362,9 @@ static void draw_chat_entry(int row, int line_index) {
     clrtoeol();
     if (line_index < 0 || line_index >= chat_count) return;
     color_pair = chat_colors[line_index % CHAT_LINES];
-    if (color_pair > 0) attron(COLOR_PAIR(color_pair));
+    if (color_pair > 0) attron(A_BOLD | COLOR_PAIR(color_pair));
     draw_utf8_chat_line(row, chat_log[line_index % CHAT_LINES]);
-    if (color_pair > 0) attroff(COLOR_PAIR(color_pair));
+    if (color_pair > 0) attroff(A_BOLD | COLOR_PAIR(color_pair));
 }
 
 static void draw_streamed_chat(int previous_count, int previous_scroll) {
@@ -390,15 +436,15 @@ static void draw_chat(void) {
         line_idx = start + i;
         if (line_idx >= 0 && line_idx < chat_count) {
             cpair = chat_colors[line_idx % CHAT_LINES];
-            if (cpair > 0) attron(COLOR_PAIR(cpair));
+            if (cpair > 0) attron(A_BOLD | COLOR_PAIR(cpair));
             draw_utf8_chat_line(i + 1,
                                 chat_log[line_idx % CHAT_LINES]);
-            if (cpair > 0) attroff(COLOR_PAIR(cpair));
+            if (cpair > 0) attroff(A_BOLD | COLOR_PAIR(cpair));
         }
     }
 
     move(chat_rows + 1, 0);
-    attron(A_REVERSE | COLOR_PAIR(COLOR_STATUS));
+    attron(A_BOLD | COLOR_PAIR(COLOR_STATUS));
     for (i = 0; i < cols; i++) addch(' ');
     mvprintw(chat_rows + 1, 1,
         " Tokens:%d Turns:%d Tok/s:%.1f | T:%.1f N:%.1f FP:%.1f RP:%.1f TP:%.2f ",
@@ -406,7 +452,7 @@ static void draw_chat(void) {
         engine_state.last_tokens_per_second,
         engine_state.cfg_temp, engine_state.cfg_noise,
         engine_state.cfg_freq_penalty, engine_state.cfg_rep_penalty, engine_state.cfg_top_p);
-    attroff(A_REVERSE | COLOR_PAIR(COLOR_STATUS));
+    attroff(A_BOLD | COLOR_PAIR(COLOR_STATUS));
 
     move(rows - 1, 0);
     clrtoeol();
@@ -424,7 +470,9 @@ static void draw_input(const char *buf, int cursor) {
     clrtoeol();
     max_display = cols - 6;
     if (max_display < 0) max_display = 0;
+    attron(A_BOLD | COLOR_PAIR(COLOR_USER));
     mvprintw(input_row, 0, "You: %.*s", max_display, buf);
+    attroff(A_BOLD | COLOR_PAIR(COLOR_USER));
     move(input_row, 5 + (cursor > max_display ? max_display : cursor));
 }
 
@@ -442,7 +490,11 @@ static void draw_autocomplete(const char *buf, int buflen) {
     if (buflen < 1 || buf[0] != '/') return;
 
     for (i = 0; i < SLASH_CMD_COUNT; i++) {
-        if (strncmp(slash_cmds[i].cmd, buf, buflen) == 0) {
+        if ((strcmp(slash_cmds[i].cmd, "/effort") != 0 ||
+             current_model_supports_effort()) &&
+            (strcmp(slash_cmds[i].cmd, "/code") != 0 ||
+             current_model_supports_code_mode()) &&
+            strncmp(slash_cmds[i].cmd, buf, buflen) == 0) {
             matches[match_count++] = i;
         }
     }
@@ -467,8 +519,10 @@ static void draw_autocomplete(const char *buf, int buflen) {
     if (box_h > rows / 2) box_h = rows / 2;
 
     box_x = 0;
-    box_y = rows - 3 - box_h;
+    box_y = rows - 4 - box_h;
     if (box_y < 1) box_y = 1;
+
+    draw_box_shadow(box_y, box_x, box_h, box_w, rows, cols);
 
     attron(COLOR_PAIR(COLOR_STATUS));
     for (i = 0; i < box_h; i++) {
@@ -512,6 +566,24 @@ static int str_casecmp(const char *a, const char *b) {
     return (unsigned char)*a - (unsigned char)*b;
 }
 
+static const char *effort_name(int effort_mode) {
+    const EngineVtable *engine;
+
+    engine = models[current_model].engine;
+    if (!engine->effort_modes || effort_mode < 0 ||
+        effort_mode >= engine->effort_mode_count)
+        return "Unavailable";
+    return engine->effort_modes[effort_mode];
+}
+
+static int parse_effort(const char *text) {
+    int i;
+
+    for (i = 0; i < models[current_model].engine->effort_mode_count; i++)
+        if (str_casecmp(text, effort_name(i)) == 0) return i;
+    return -1;
+}
+
 static void train_write_escaped(FILE *f, const char *s) {
     while (*s) {
         switch (*s) {
@@ -525,17 +597,47 @@ static void train_write_escaped(FILE *f, const char *s) {
     }
 }
 
-static void train_append(const char *user_input, const char *assistant_output) {
+static void train_append(const char *user_input, const char *assistant_thinking,
+                         const char *assistant_before_tool,
+                         const char *tool, const char *tool_input,
+                         const char *assistant_output) {
     FILE *f;
 
     f = fopen("train.txt", "a");
     if (!f) return;
     fprintf(f, "        {.user = \"");
     train_write_escaped(f, user_input);
-    fprintf(f, "\", .assistant =\n            \"");
-    train_write_escaped(f, assistant_output);
+    if (assistant_thinking && assistant_thinking[0]) {
+        fprintf(f, "\", .assistant_thinking =\n            \"");
+        train_write_escaped(f, assistant_thinking);
+    }
+    if (assistant_before_tool && assistant_before_tool[0]) {
+        fprintf(f, "\", .assistant =\n            \"");
+        train_write_escaped(f, assistant_before_tool);
+    }
+    if (tool && tool[0]) {
+        fprintf(f, "\", .use_tool = \"");
+        train_write_escaped(f, tool);
+        if (tool_input && tool_input[0]) {
+            fprintf(f, "\", .tool_input =\n            \"");
+            train_write_escaped(f, tool_input);
+        }
+        fprintf(f, "\", .assistant_after_tool =\n            \"");
+    } else {
+        fprintf(f, "\", .assistant =\n            \"");
+    }
+    if (assistant_output) train_write_escaped(f, assistant_output);
     fprintf(f, "\"\n        },\n");
     fclose(f);
+}
+
+static int train_ensure_file(void) {
+    FILE *f;
+
+    f = fopen("train.txt", "a");
+    if (!f) return 0;
+    fclose(f);
+    return 1;
 }
 
 static int model_dialog(void) {
@@ -545,6 +647,7 @@ static int model_dialog(void) {
     int i, j;
     int box_y, box_x, box_h, box_w;
     int old_model;
+    int description_width;
     const char *marker;
 
     selected = current_model;
@@ -559,6 +662,8 @@ static int model_dialog(void) {
         box_x = (cols - box_w) / 2;
         if (box_y < 0) box_y = 0;
         if (box_x < 0) box_x = 0;
+
+        draw_box_shadow(box_y, box_x, box_h, box_w, rows, cols);
 
         attron(COLOR_PAIR(COLOR_STATUS));
         for (i = 0; i < box_h; i++) {
@@ -591,14 +696,18 @@ static int model_dialog(void) {
 
         for (i = 0; i < MODEL_COUNT; i++) {
             marker = (i == old_model) ? "* " : "  ";
+            description_width = box_w - 14 - (int)strlen(models[i].name);
+            if (description_width < 0) description_width = 0;
             move(box_y + 2 + i, box_x + 3);
             if (i == selected) {
-                attron(A_BOLD | COLOR_PAIR(COLOR_USER));
-                printw("%s> %s  -  %s", marker, models[i].name, models[i].description);
-                attroff(A_BOLD | COLOR_PAIR(COLOR_USER));
+                attron(COLOR_PAIR(COLOR_SELECTED));
+                printw("%s> %s  -  %.*s", marker, models[i].name,
+                       description_width, models[i].description);
+                attroff(COLOR_PAIR(COLOR_SELECTED));
             } else {
                 attron(COLOR_PAIR(COLOR_STATUS));
-                printw("%s  %s  -  %s", marker, models[i].name, models[i].description);
+                printw("%s  %s  -  %.*s", marker, models[i].name,
+                       description_width, models[i].description);
                 attroff(COLOR_PAIR(COLOR_STATUS));
             }
         }
@@ -649,6 +758,8 @@ static void prompt_editor(char *buf, int bufsize) {
         box_x = (cols - box_w) / 2;
         if (box_y < 0) box_y = 0;
         if (box_x < 0) box_x = 0;
+
+        draw_box_shadow(box_y, box_x, box_h, box_w, rows, cols);
 
         text_w = box_w - 4;
         if (text_w < 10) text_w = 10;
@@ -848,6 +959,7 @@ static int handle_command(const char *cmd) {
     char model_line[256];
     char *end;
     long parsed;
+    size_t used;
 
     if (cmd[0] != '/') return 0;
 
@@ -863,8 +975,12 @@ static int handle_command(const char *cmd) {
         chat_add("/topp <val>    - top-p / nucleus sampling (default 1.0)");
         chat_add("/presence <val>- presence penalty (default 0.0)");
         chat_add("/maxwords <val>- override max response words (0=auto)");
+        if (current_model_supports_effort())
+            chat_add("/effort <mode> - set reasoning effort");
+        if (current_model_supports_code_mode())
+            chat_add("/code          - toggle code mode");
         chat_add("/model         - Switch model");
-        chat_add("/prompt        - Edit system prompt (v2 only)");
+        chat_add("/prompt        - Edit system prompt (v2 and v3 only)");
         chat_add("/search        - toggle autonomous web search");
         chat_add("/train         - toggle train mode (writes train.txt)");
         chat_add("/stats         - show session statistics");
@@ -889,6 +1005,11 @@ static int handle_command(const char *cmd) {
         snprintf(model_line, sizeof(model_line), "Context window: %d tokens",
                  models[current_model].engine->context_window);
         chat_add(model_line);
+        if (current_model_supports_effort()) {
+            snprintf(model_line, sizeof(model_line), "Effort: %s",
+                     effort_name(engine_state.effort_mode));
+            chat_add(model_line);
+        }
         snprintf(model_line, sizeof(model_line), "Topics tracked: %d", engine_state.topic_n);
         chat_add(model_line);
         snprintf(model_line, sizeof(model_line), "Absorbed words: %d", engine_state.absorbed_n);
@@ -909,12 +1030,16 @@ static int handle_command(const char *cmd) {
             choice = model_dialog();
             if (choice >= 0 && choice < MODEL_COUNT) {
                 current_model = choice;
+                if (!models[choice].engine->has_code_mode) code_mode = 0;
                 engine_state.cfg_temp = models[choice].default_temp;
                 engine_state.cfg_noise = models[choice].default_noise;
                 engine_state.cfg_freq_penalty = models[choice].default_freq_penalty;
                 engine_state.cfg_rep_penalty = models[choice].default_rep_penalty;
                 engine_state.cfg_top_p = models[choice].default_top_p;
                 engine_state.cfg_presence_penalty = models[choice].default_presence_penalty;
+                if (models[choice].engine->effort_mode_count > 0)
+                    engine_state.effort_mode =
+                        models[choice].engine->default_effort_mode;
                 snprintf(model_line, sizeof(model_line), "Switched to %s", models[choice].name);
                 chat_add(model_line);
             } else {
@@ -924,12 +1049,16 @@ static int handle_command(const char *cmd) {
             for (i = 0; i < MODEL_COUNT; i++) {
                 if (str_casecmp(arg, models[i].name) == 0) {
                     current_model = i;
+                    if (!models[i].engine->has_code_mode) code_mode = 0;
                     engine_state.cfg_temp = models[i].default_temp;
                     engine_state.cfg_noise = models[i].default_noise;
                     engine_state.cfg_freq_penalty = models[i].default_freq_penalty;
                     engine_state.cfg_rep_penalty = models[i].default_rep_penalty;
                     engine_state.cfg_top_p = models[i].default_top_p;
                     engine_state.cfg_presence_penalty = models[i].default_presence_penalty;
+                    if (models[i].engine->effort_mode_count > 0)
+                        engine_state.effort_mode =
+                            models[i].engine->default_effort_mode;
                     snprintf(model_line, sizeof(model_line), "Switched to %s", models[i].name);
                     chat_add(model_line);
                     return 1;
@@ -965,10 +1094,28 @@ static int handle_command(const char *cmd) {
     if (strcmp(name, "/train") == 0) {
         train_mode = !train_mode;
         if (train_mode) {
-            chat_add("Train mode enabled. Writing to train.txt.");
+            if (train_ensure_file()) {
+                chat_add("Train mode enabled. Writing to train.txt.");
+            } else {
+                train_mode = 0;
+                chat_add("Could not create train.txt in this directory.");
+            }
         } else {
             chat_add("Train mode disabled.");
         }
+        return 1;
+    }
+
+    if (strcmp(name, "/code") == 0) {
+        if (!current_model_supports_code_mode()) {
+            chat_add("Code mode is not supported by this model.");
+            return 1;
+        }
+        code_mode = !code_mode;
+        if (code_mode)
+            chat_add("Code mode enabled. Files stay in the launch directory and are not executed.");
+        else
+            chat_add("Code mode disabled.");
         return 1;
     }
 
@@ -980,6 +1127,42 @@ static int handle_command(const char *cmd) {
         prompt_editor(engine_state.system_prompt, SYSTEM_PROMPT_MAX);
         clear();
         chat_add("System prompt updated.");
+        return 1;
+    }
+
+    if (strcmp(name, "/effort") == 0 && current_model_supports_effort()) {
+        if (n < 2) {
+            snprintf(model_line, sizeof(model_line), "Effort: %s. Available:",
+                     effort_name(engine_state.effort_mode));
+            for (i = 0;
+                 i < models[current_model].engine->effort_mode_count;
+                 i++) {
+                used = strlen(model_line);
+                snprintf(model_line + used, sizeof(model_line) - used,
+                         "%s%s", i == 0 ? " " : ", ", effort_name(i));
+            }
+            used = strlen(model_line);
+            if (used + 1 < sizeof(model_line)) {
+                model_line[used] = '.';
+                model_line[used + 1] = '\0';
+            }
+            chat_add(model_line);
+            return 1;
+        }
+        i = parse_effort(arg);
+        if (i < 0) {
+            chat_add("Invalid effort mode. Type /effort to list modes.");
+            return 1;
+        }
+        engine_state.effort_mode = i;
+        snprintf(model_line, sizeof(model_line), "Effort set to %s.",
+                 effort_name(engine_state.effort_mode));
+        chat_add(model_line);
+        return 1;
+    }
+
+    if (strcmp(name, "/effort") == 0) {
+        chat_add("Unknown command. Type /help for usage.");
         return 1;
     }
 
@@ -1083,10 +1266,10 @@ static void show_status(const char *msg) {
     status_row = rows - 3;
 
     move(status_row, 0);
-    attron(A_DIM);
+    attron(A_BOLD | COLOR_PAIR(COLOR_STATUS));
     clrtoeol();
     mvaddnstr(status_row, 0, msg, cols - 1);
-    attroff(A_DIM);
+    attroff(A_BOLD | COLOR_PAIR(COLOR_STATUS));
     refresh();
     (void)cols;
 }
@@ -1119,12 +1302,115 @@ static int cb_generation_should_stop(void) {
     return 0;
 }
 
+static int capture_generated_text(char **destination, size_t *capacity,
+                                  const char *text) {
+    char *grown;
+    size_t used;
+    size_t length;
+    size_t separator;
+    size_t required;
+    size_t new_capacity;
+
+    if (!text || !text[0]) return 1;
+    used = *destination ? strlen(*destination) : 0;
+    length = strlen(text);
+    separator = used > 0 &&
+                !isspace((unsigned char)(*destination)[used - 1]) &&
+                !isspace((unsigned char)text[0]);
+    required = used + separator + length + 1;
+    if (required < used || required < length) return 0;
+    if (required > *capacity) {
+        new_capacity = *capacity ? *capacity : 256;
+        while (new_capacity < required) {
+            if (new_capacity > (size_t)-1 / 2) {
+                new_capacity = required;
+                break;
+            }
+            new_capacity *= 2;
+        }
+        grown = (char *)realloc(*destination, new_capacity);
+        if (!grown) return 0;
+        *destination = grown;
+        *capacity = new_capacity;
+        if (used == 0) (*destination)[0] = '\0';
+    }
+    if (separator) (*destination)[used++] = ' ';
+    memcpy(*destination + used, text, length + 1);
+    return 1;
+}
+
+static void cb_chat_add_c(const char *line, int color) {
+    if (color == engine_state.color_think && strcmp(line, "Thoughts") != 0)
+        capture_generated_text(&engine_state.last_thinking,
+                               &engine_state.last_thinking_capacity, line);
+    if (color == engine_state.color_ai)
+        capture_generated_text(&engine_state.last_response,
+                               &engine_state.last_response_capacity, line);
+    chat_add_c(line, color);
+}
+
+static void cb_chat_add_wrapped(const char *prefix, const char *text,
+                                int color) {
+    if (color == engine_state.color_think)
+        capture_generated_text(&engine_state.last_thinking,
+                               &engine_state.last_thinking_capacity, text);
+    if (color == engine_state.color_ai)
+        capture_generated_text(&engine_state.last_response,
+                               &engine_state.last_response_capacity, text);
+    chat_add_wrapped(prefix, text, color);
+}
+
+static void cb_use_tool(const char *name, const char *input) {
+    char message[256];
+
+    if (engine_state.last_response && engine_state.last_response[0]) {
+        if (engine_state.last_response_before_tool)
+            engine_state.last_response_before_tool[0] = '\0';
+        capture_generated_text(&engine_state.last_response_before_tool,
+            &engine_state.last_response_before_tool_capacity,
+            engine_state.last_response);
+        engine_state.last_response[0] = '\0';
+    }
+    if (engine_state.last_tool) engine_state.last_tool[0] = '\0';
+    if (engine_state.last_tool_input) engine_state.last_tool_input[0] = '\0';
+    capture_generated_text(&engine_state.last_tool,
+                           &engine_state.last_tool_capacity, name);
+    capture_generated_text(&engine_state.last_tool_input,
+                           &engine_state.last_tool_input_capacity, input);
+    snprintf(message, sizeof(message), "Tool: %.200s", name);
+    chat_add(message);
+    chat_add_wrapped("    ", input, 0);
+}
+
 static void cb_stream_text(const char *prefix, const char *text, int color) {
     int previous_count;
     int previous_scroll;
+    int in_token;
+    int token_count;
+    int i;
+    unsigned char character;
 
     previous_count = chat_count;
     previous_scroll = chat_scroll;
+    in_token = 0;
+    token_count = 0;
+    if (color == engine_state.color_ai) {
+        capture_generated_text(&engine_state.last_response,
+                               &engine_state.last_response_capacity, text);
+        for (i = 0; text[i]; i++) {
+            character = (unsigned char)text[i];
+            if (isspace(character)) {
+                in_token = 0;
+            } else if (!in_token) {
+                token_count++;
+                in_token = 1;
+            }
+        }
+        engine_state.visible_tokens += token_count;
+    } else if (color == engine_state.color_think) {
+        capture_generated_text(&engine_state.last_thinking,
+                               &engine_state.last_thinking_capacity, text);
+    }
     chat_add_wrapped(prefix, text, color);
     draw_streamed_chat(previous_count, previous_scroll);
     refresh();
@@ -1132,14 +1418,15 @@ static void cb_stream_text(const char *prefix, const char *text, int color) {
 
 static const EngineCallbacks engine_callbacks = {
     chat_add,
-    chat_add_c,
-    chat_add_wrapped,
+    cb_chat_add_c,
+    cb_chat_add_wrapped,
     draw_chat,
     show_status,
     cb_refresh_screen,
     cb_curs_set_fn,
     cb_generation_should_stop,
-    cb_stream_text
+    cb_stream_text,
+    cb_use_tool
 };
 
 static void sync_engine_state(void) {
@@ -1226,10 +1513,20 @@ static void generate_response(const char *input) {
     struct timespec started;
     struct timespec finished;
     double elapsed;
-    long sampled_before;
-    long sampled_delta;
+    long visible_before;
+    long visible_delta;
+#ifdef ENABLE_TUFFAI_V3
+    char code_result[512];
+    char code_prompt[INPUT_MAX + 640];
+#endif
 
     sync_engine_state();
+    if (engine_state.last_thinking) engine_state.last_thinking[0] = '\0';
+    if (engine_state.last_response) engine_state.last_response[0] = '\0';
+    if (engine_state.last_response_before_tool)
+        engine_state.last_response_before_tool[0] = '\0';
+    if (engine_state.last_tool) engine_state.last_tool[0] = '\0';
+    if (engine_state.last_tool_input) engine_state.last_tool_input[0] = '\0';
 
     boost = compute_repetition_boost(&engine_state);
     orig_freq = engine_state.cfg_freq_penalty;
@@ -1237,17 +1534,31 @@ static void generate_response(const char *input) {
     engine_state.cfg_freq_penalty += boost;
     engine_state.cfg_rep_penalty += boost * 0.8f;
 
-    sampled_before = engine_state.sampled_tokens;
+    visible_before = engine_state.visible_tokens;
     generation_stop_requested = 0;
     clock_gettime(CLOCK_MONOTONIC, &started);
-    models[current_model].engine->generate_response(&engine_state, &engine_callbacks, input);
+#ifdef ENABLE_TUFFAI_V3
+    if (code_mode && current_model_supports_code_mode()) {
+        v3_run_code_mode(&engine_state, &engine_callbacks, input,
+                         code_result, sizeof(code_result));
+        chat_add(code_result);
+        snprintf(code_prompt, sizeof(code_prompt),
+                 "%s Code mode operation result: %s",
+                 input, code_result);
+        models[current_model].engine->generate_response(
+            &engine_state, &engine_callbacks, code_prompt);
+    } else
+#endif
+        models[current_model].engine->generate_response(
+            &engine_state, &engine_callbacks, input);
     generation_stop_requested = 0;
     clock_gettime(CLOCK_MONOTONIC, &finished);
     elapsed = (double)(finished.tv_sec - started.tv_sec) +
               (double)(finished.tv_nsec - started.tv_nsec) / 1000000000.0;
-    sampled_delta = engine_state.sampled_tokens - sampled_before;
-    if (elapsed > 0.0 && sampled_delta > 0)
-        engine_state.last_tokens_per_second = (float)((double)sampled_delta / elapsed);
+    visible_delta = engine_state.visible_tokens - visible_before;
+    if (elapsed > 0.0 && visible_delta > 0)
+        engine_state.last_tokens_per_second =
+            (float)((double)visible_delta / elapsed);
     else
         engine_state.last_tokens_per_second = 0.0f;
 
@@ -1292,17 +1603,18 @@ int main(void) {
     engine_state.cfg_rep_penalty = models[current_model].default_rep_penalty;
     engine_state.cfg_top_p = models[current_model].default_top_p;
     engine_state.cfg_presence_penalty = models[current_model].default_presence_penalty;
+    engine_state.effort_mode =
+        models[current_model].engine->default_effort_mode;
     engine_state.hist_buf = hist_buf;
     engine_state.hist_tokens = hist_tokens;
     engine_state.hist_lens = hist_lens;
     engine_state.hist_cnt = &hist_cnt;
     engine_state.color_think = COLOR_THINK;
     engine_state.color_ai = COLOR_AI;
-    strncpy(engine_state.system_prompt,
-            "You are TuffAI-v2, a helpful but confused assistant. "
-            "Answer questions with confidence even when unsure. ",
-            SYSTEM_PROMPT_MAX - 1);
-    engine_state.system_prompt[SYSTEM_PROMPT_MAX - 1] = '\0';
+    snprintf(engine_state.system_prompt, SYSTEM_PROMPT_MAX,
+             "You are %s, a helpful but confused assistant. "
+             "Answer questions with confidence even when unsure. ",
+             models[current_model].name);
 
     initscr();
     set_escdelay(25);
@@ -1319,6 +1631,8 @@ int main(void) {
         init_pair(COLOR_THINK, COLOR_YELLOW, -1);
         init_pair(COLOR_STATUS, COLOR_WHITE, COLOR_BLUE);
         init_pair(COLOR_CMD, COLOR_MAGENTA, -1);
+        init_pair(COLOR_SHADOW, COLOR_BLACK, -1);
+        init_pair(COLOR_SELECTED, COLOR_BLACK, COLOR_WHITE);
     }
 
     memset(&sa_winch, 0, sizeof(sa_winch));
@@ -1380,14 +1694,16 @@ int main(void) {
                     break;
                 }
             } else {
-                int resp_slot;
                 snprintf(user_line, sizeof(user_line), "You: %s", input_buf);
                 chat_add_c(user_line, COLOR_USER);
                 generate_response(input_buf);
-                if (train_mode && engine_state.prev_resp_count > 0) {
-                    resp_slot = (engine_state.prev_resp_count - 1) % PREV_RESPONSE_MAX;
-                    train_append(input_buf, engine_state.prev_responses[resp_slot]);
-                }
+                if (train_mode && engine_state.last_response &&
+                    engine_state.last_response[0])
+                    train_append(input_buf, engine_state.last_thinking,
+                                 engine_state.last_response_before_tool,
+                                 engine_state.last_tool,
+                                 engine_state.last_tool_input,
+                                 engine_state.last_response);
                 chat_add("");
             }
 
@@ -1414,6 +1730,11 @@ int main(void) {
         }
     }
 
+    free(engine_state.last_thinking);
+    free(engine_state.last_response);
+    free(engine_state.last_response_before_tool);
+    free(engine_state.last_tool);
+    free(engine_state.last_tool_input);
     endwin();
     return 0;
 }

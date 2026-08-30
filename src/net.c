@@ -48,6 +48,21 @@ static float position_embed[NET_CONTEXT_MAX][EMBED_DIM];
 static int last_words[64];
 static int last_words_n = 0;
 
+static float fast_tanh_value(float value) {
+    float magnitude;
+
+    magnitude = value < 0.0f ? -value : value;
+    return value / (1.0f + magnitude);
+}
+
+static float fast_exp_negative(float value) {
+    float square;
+
+    if (value < -10.0f) return 0.0f;
+    square = value * value;
+    return 1.0f / (1.0f - value + 0.48f * square);
+}
+
 float frand_r(void) {
     return rng_signed();
 }
@@ -185,6 +200,46 @@ void encode_context(const int *tokens, int n, float *ctx) {
         ctx[d] = (ctx[d] - mean) * inv_scale;
 }
 
+void encode_context_fast(const int *tokens, int n, float *ctx) {
+    float mean;
+    float variance;
+    float scale;
+    float weight;
+    float weight_sum;
+    int used;
+    int first;
+    int token;
+    int i;
+    int d;
+
+    memset(ctx, 0, EMBED_DIM * sizeof(float));
+    if (!tokens || n <= 0) return;
+    used = n < 16 ? n : 16;
+    first = n - used;
+    weight_sum = 0.0f;
+    for (i = 0; i < used; i++) {
+        token = tokens[first + i] % MAX_VOCAB_SIZE;
+        if (token < 0) token += MAX_VOCAB_SIZE;
+        weight = (float)(i + 1);
+        weight_sum += weight;
+        for (d = 0; d < EMBED_DIM; d++)
+            ctx[d] += embeddings[token][d] * weight;
+    }
+    mean = 0.0f;
+    for (d = 0; d < EMBED_DIM; d++) {
+        ctx[d] /= weight_sum;
+        mean += ctx[d];
+    }
+    mean /= (float)EMBED_DIM;
+    variance = 0.0f;
+    for (d = 0; d < EMBED_DIM; d++)
+        variance += (ctx[d] - mean) * (ctx[d] - mean);
+    variance /= (float)EMBED_DIM;
+    scale = 1.0f / sqrtf(variance + 0.00001f);
+    for (d = 0; d < EMBED_DIM; d++)
+        ctx[d] = (ctx[d] - mean) * scale;
+}
+
 void next_embed(const float *ctx, const float *prev, const float *feat_ctx, float *out) {
     float inp[EMBED_DIM * 3];
     float h[HIDDEN];
@@ -204,6 +259,32 @@ void next_embed(const float *ctx, const float *prev, const float *feat_ctx, floa
         z = b2[k];
         for (j = 0; j < HIDDEN; j++) z += h[j] * W2[j][k];
         out[k] = tanhf(z + ctx[k] * 0.28f + prev[k] * 0.12f);
+    }
+}
+
+void next_embed_fast(const float *ctx, const float *prev,
+                     const float *feat_ctx, float *out) {
+    float inp[EMBED_DIM * 3];
+    float h[16];
+    float value;
+    int i;
+    int j;
+    int k;
+
+    memcpy(inp, ctx, EMBED_DIM * sizeof(float));
+    memcpy(inp + EMBED_DIM, prev, EMBED_DIM * sizeof(float));
+    memcpy(inp + EMBED_DIM * 2, feat_ctx, EMBED_DIM * sizeof(float));
+    for (j = 0; j < 16; j++) {
+        value = b1[j];
+        for (i = 0; i < EMBED_DIM * 3; i++)
+            value += inp[i] * W1[i][j];
+        h[j] = fast_tanh_value(value);
+    }
+    for (k = 0; k < EMBED_DIM; k++) {
+        value = b2[k];
+        for (j = 0; j < 16; j++) value += h[j] * W2[j][k];
+        out[k] = fast_tanh_value(
+            value + ctx[k] * 0.28f + prev[k] * 0.12f);
     }
 }
 
@@ -346,4 +427,187 @@ int sample_vocab_contextual(const float *target, float temperature, float noise,
     return sample_vocab_internal(target, temperature, noise, freq_penalty,
                                  rep_penalty, top_p, vocab_size,
                                  bias_tokens, bias_count, bias_strength);
+}
+
+static int candidate_gcd(int left, int right) {
+    int remainder;
+
+    while (right != 0) {
+        remainder = left % right;
+        left = right;
+        right = remainder;
+    }
+    return left;
+}
+
+static void add_candidate(int token, int vocab_size, int *candidates,
+                          int *candidate_count, int candidate_limit,
+                          unsigned int *candidate_marks,
+                          unsigned int candidate_generation) {
+    if (token < 0 || token >= vocab_size) return;
+    if (*candidate_count >= candidate_limit) return;
+    if (candidate_marks[token] == candidate_generation) return;
+    candidate_marks[token] = candidate_generation;
+    candidates[(*candidate_count)++] = token;
+}
+
+int sample_vocab_contextual_fast(const float *target, float temperature,
+                                 float noise, float freq_penalty,
+                                 float rep_penalty, float top_p,
+                                 int vocab_size, const int *bias_tokens,
+                                 int bias_count, float bias_strength) {
+    static unsigned int candidate_marks[MAX_VOCAB_SIZE];
+    static unsigned int candidate_generation;
+    int candidates[1024];
+    float scores[1024];
+    float bucket_sums[256];
+    unsigned char recent_counts[MAX_VOCAB_SIZE];
+    float context_bonuses[MAX_VOCAB_SIZE];
+    float max_score;
+    float score_sum;
+    float random_score;
+    float cumulative;
+    float threshold;
+    float effective_noise;
+    float dot;
+    float penalty;
+    float context_bonus;
+    int candidate_count;
+    int candidate_limit;
+    int contextual_limit;
+    int bias_start;
+    int bias_position;
+    int start;
+    int step;
+    int token;
+    int index;
+#ifndef USE_SSE
+    int dimension;
+#endif
+    int recent_count;
+    int bucket;
+    int cutoff_bucket;
+
+    if (vocab_size <= 0) return 0;
+    if (vocab_size > MAX_VOCAB_SIZE) vocab_size = MAX_VOCAB_SIZE;
+    candidate_limit = vocab_size < 64 ? vocab_size : 64;
+    contextual_limit = candidate_limit > 16 ? candidate_limit - 16 :
+                       candidate_limit;
+    candidate_generation++;
+    if (candidate_generation == 0) {
+        memset(candidate_marks, 0, sizeof(candidate_marks));
+        candidate_generation = 1;
+    }
+    memset(recent_counts, 0,
+           (size_t)vocab_size * sizeof(recent_counts[0]));
+    memset(context_bonuses, 0,
+           (size_t)vocab_size * sizeof(context_bonuses[0]));
+    for (index = 0; index < last_words_n; index++) {
+        token = last_words[index];
+        if (token >= 0 && token < vocab_size && recent_counts[token] < 255)
+            recent_counts[token]++;
+    }
+    bias_start = bias_count > 256 ? bias_count - 256 : 0;
+    if (bias_tokens && bias_strength > 0.0f) {
+        for (bias_position = bias_start; bias_position < bias_count;
+             bias_position++) {
+            token = bias_tokens[bias_position];
+            if (token >= 0 && token < vocab_size)
+                context_bonuses[token] += bias_strength *
+                    (0.25f + 0.75f *
+                     (float)(bias_position - bias_start + 1) /
+                     (float)(bias_count - bias_start + 1));
+        }
+    }
+    candidate_count = 0;
+    if (bias_tokens) {
+        for (bias_position = bias_start; bias_position < bias_count;
+             bias_position++)
+            add_candidate(bias_tokens[bias_position], vocab_size,
+                          candidates, &candidate_count, contextual_limit,
+                          candidate_marks, candidate_generation);
+    }
+    for (index = 0; index < last_words_n; index++)
+        add_candidate(last_words[index], vocab_size, candidates,
+                      &candidate_count, contextual_limit, candidate_marks,
+                      candidate_generation);
+    start = rng_range(vocab_size);
+    step = 1 + rng_range(vocab_size - 1);
+    while (candidate_gcd(step, vocab_size) != 1) {
+        step++;
+        if (step >= vocab_size) step = 1;
+    }
+    token = start;
+    while (candidate_count < candidate_limit) {
+        add_candidate(token, vocab_size, candidates, &candidate_count,
+                      candidate_limit, candidate_marks,
+                      candidate_generation);
+        token += step;
+        if (token >= vocab_size) token %= vocab_size;
+    }
+    effective_noise = noise;
+    if (effective_noise < 0.5f) effective_noise = 0.5f;
+    for (index = 0; index < candidate_count; index++) {
+        token = candidates[index];
+#ifdef USE_SSE
+        dot = dot_sse(target, embeddings[token], EMBED_DIM);
+#else
+        dot = 0.0f;
+        for (dimension = 0; dimension < EMBED_DIM; dimension++)
+            dot += target[dimension] * embeddings[token][dimension];
+#endif
+        recent_count = recent_counts[token];
+        penalty = 0.0f;
+        if (recent_count > 0) {
+            penalty -= freq_penalty * (float)recent_count;
+            penalty -= rep_penalty * 2.0f;
+            penalty -= 1.5f;
+        }
+        context_bonus = context_bonuses[token];
+        scores[index] = dot / temperature +
+                        rng_unit() * effective_noise + penalty +
+                        context_bonus;
+    }
+    max_score = scores[0];
+    for (index = 1; index < candidate_count; index++)
+        if (scores[index] > max_score) max_score = scores[index];
+    score_sum = 0.0f;
+    for (index = 0; index < candidate_count; index++) {
+        scores[index] = fast_exp_negative(scores[index] - max_score);
+        score_sum += scores[index];
+    }
+    if (top_p < 1.0f && top_p > 0.0f) {
+        threshold = score_sum * top_p;
+        memset(bucket_sums, 0, sizeof(bucket_sums));
+        for (index = 0; index < candidate_count; index++) {
+            bucket = (int)(scores[index] * 255.0f);
+            if (bucket < 0) bucket = 0;
+            if (bucket > 255) bucket = 255;
+            bucket_sums[bucket] += scores[index];
+        }
+        cumulative = 0.0f;
+        cutoff_bucket = 0;
+        for (bucket = 255; bucket >= 0; bucket--) {
+            cumulative += bucket_sums[bucket];
+            if (cumulative >= threshold) {
+                cutoff_bucket = bucket;
+                break;
+            }
+        }
+        score_sum = 0.0f;
+        for (index = 0; index < candidate_count; index++) {
+            bucket = (int)(scores[index] * 255.0f);
+            if (bucket < cutoff_bucket)
+                scores[index] = 0.0f;
+            else
+                score_sum += scores[index];
+        }
+    }
+    random_score = rng_unit() * score_sum;
+    cumulative = 0.0f;
+    for (index = 0; index < candidate_count; index++) {
+        cumulative += scores[index];
+        if (random_score < cumulative) return candidates[index];
+    }
+    return candidates[candidate_count - 1];
 }

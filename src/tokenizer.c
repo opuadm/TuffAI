@@ -544,7 +544,7 @@ int tokenize(const char *input, int *tokens, int max_tok) {
     return count;
 }
 
-#ifdef ENABLE_TUFFAI_V2
+#if defined(ENABLE_TUFFAI_V2) || defined(ENABLE_TUFFAI_V3)
 static int ascii_case_equal(const char *left, const char *right) {
     unsigned char a;
     unsigned char b;
@@ -559,11 +559,13 @@ static int ascii_case_equal(const char *left, const char *right) {
     return *left == '\0' && *right == '\0';
 }
 
-static int v2_vocab_index(const char *word) {
+static int model_vocab_index(const char *word, const char *const *model_vocab,
+                             int vocab_size) {
     int i;
 
-    for (i = 0; i < V2_VOCAB_SIZE; i++)
-        if (ascii_case_equal(word, v2_vocab[i])) return i;
+    for (i = 0; i < vocab_size; i++)
+        if (model_vocab[i] &&
+            ascii_case_equal(word, model_vocab[i])) return i;
     return -1;
 }
 
@@ -575,6 +577,7 @@ static int utf8_sequence_length(unsigned char first) {
     return 1;
 }
 
+#ifdef ENABLE_TUFFAI_V2
 int v2_tokenize(const char *input, int *tokens, int max_tok) {
     char *buffer;
     char *word;
@@ -593,7 +596,7 @@ int v2_tokenize(const char *input, int *tokens, int max_tok) {
     count = 0;
     word = strtok(buffer, " \t\n\r.,!?;:\"'()[]{}");
     while (word && count < max_tok) {
-        index = v2_vocab_index(word);
+        index = model_vocab_index(word, v2_vocab, V2_VOCAB_SIZE);
         if (index >= 0) {
             tokens[count++] = index;
         } else {
@@ -612,6 +615,48 @@ int v2_tokenize(const char *input, int *tokens, int max_tok) {
     free(buffer);
     return count;
 }
+#endif
+
+#ifdef ENABLE_TUFFAI_V3
+int v3_tokenize(const char *input, int *tokens, int max_tok) {
+    char *buffer;
+    char *word;
+    size_t input_length;
+    int count;
+    int index;
+    int byte_pos;
+    int sequence_len;
+    unsigned hash;
+
+    if (!input || !tokens || max_tok <= 0 || !input[0]) return 0;
+    input_length = strlen(input);
+    buffer = (char *)malloc(input_length + 1);
+    if (!buffer) return 0;
+    memcpy(buffer, input, input_length + 1);
+    count = 0;
+    word = strtok(buffer, " \t\n\r.,!?;:\"'()[]{}");
+    while (word && count < max_tok) {
+        index = model_vocab_index(word, v3_vocab, V3_VOCAB_SIZE);
+        if (index >= 0) {
+            tokens[count++] = index;
+        } else {
+            hash = hash_word(word);
+            tokens[count++] = (int)(hash % V3_VOCAB_SIZE);
+            byte_pos = 0;
+            while (word[byte_pos] && count < max_tok) {
+                sequence_len = utf8_sequence_length((unsigned char)word[byte_pos]);
+                hash = hash * 16777619u ^ (unsigned char)word[byte_pos];
+                byte_pos += sequence_len;
+                tokens[count++] = (int)(hash % V3_VOCAB_SIZE);
+            }
+        }
+        word = strtok(NULL, " \t\n\r.,!?;:\"'()[]{}");
+    }
+    free(buffer);
+    return count;
+}
+#endif
+
 #endif
 
 typedef struct {

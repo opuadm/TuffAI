@@ -14,7 +14,8 @@
 #define VOCAB_SIZE  2500
 #define ACTUAL_VOCAB 2500
 #define V2_VOCAB_SIZE 5601
-#define MAX_VOCAB_SIZE 5601
+#define V3_VOCAB_SIZE 8001
+#define MAX_VOCAB_SIZE 8001
 #define EMBED_DIM   32
 #define HIDDEN      48
 #define MAX_TOKENS  128
@@ -25,14 +26,19 @@
 #define HIST_MAX    16
 #define HIST_LEN    512
 
-#define KNOW_MAX_ENTRIES   512
+#define KNOW_MAX_ENTRIES   1024
 #define KNOW_MAX_LEN       256
 
 extern const char *vocab[VOCAB_SIZE];
 
 typedef struct {
     const char *user;
+    const char *assistant_thinking;
     const char *assistant;
+    const char *assistant_continuation;
+    const char *use_tool;
+    const char *tool_input;
+    const char *assistant_after_tool;
 } TrainingEntry;
 
 typedef struct {
@@ -97,5 +103,43 @@ const char *v2_knowledge_random_any(void);
 const char *v2_knowledge_random_code(void);
 const char *v2_knowledge_random_phrase(void);
 const char *v2_knowledge_match_user(const KnowledgeCategory *cat, const char *input);
+
+extern const char *v3_vocab[V3_VOCAB_SIZE];
+
+extern KnowledgeCategory v3_know_tech;
+extern KnowledgeCategory v3_know_general;
+extern KnowledgeCategory v3_know_phrases_en;
+extern KnowledgeCategory v3_know_phrases_pl;
+extern KnowledgeCategory v3_know_phrases_ru;
+extern KnowledgeCategory v3_know_phrases_zh;
+extern KnowledgeCategory v3_know_phrases_es;
+extern KnowledgeCategory v3_know_phrases_fr;
+extern KnowledgeCategory v3_know_phrases_de;
+extern KnowledgeCategory v3_know_phrases_it;
+extern KnowledgeCategory v3_know_phrases_pt;
+extern KnowledgeCategory v3_know_phrases_nl;
+extern KnowledgeCategory v3_know_phrases_sv;
+extern KnowledgeCategory v3_know_phrases_ja;
+extern KnowledgeCategory v3_know_phrases_ko;
+extern KnowledgeCategory v3_know_phrases_ar;
+extern KnowledgeCategory v3_know_phrases_hi;
+extern KnowledgeCategory v3_know_phrases_tr;
+extern KnowledgeCategory v3_know_code_c;
+extern KnowledgeCategory v3_know_code_py;
+extern KnowledgeCategory v3_know_code_js;
+extern KnowledgeCategory v3_know_code_misc;
+extern KnowledgeCategory v3_know_extra;
+extern KnowledgeCategory v3_opinions;
+extern KnowledgeCategory v3_know_science;
+extern KnowledgeCategory v3_know_culture;
+extern KnowledgeCategory v3_know_practical;
+
+const char *v3_knowledge_random(const KnowledgeCategory *cat);
+const char *v3_knowledge_search(const KnowledgeCategory *cat, const char *keyword);
+const char *v3_knowledge_random_any(void);
+const char *v3_knowledge_random_code(void);
+const char *v3_knowledge_random_phrase(void);
+const char *v3_knowledge_match_user(const KnowledgeCategory *cat, const char *input);
+void v3_initialize_extra(void);
 
 #endif

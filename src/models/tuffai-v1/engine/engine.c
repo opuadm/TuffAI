@@ -970,5 +970,9 @@ const EngineVtable engine_tuffai_v1 = {
     1024,
     V1_CONTEXT_TOKENS,
     ACTUAL_VOCAB,
+    0,
+    NULL,
+    0,
+    0,
     0
 };

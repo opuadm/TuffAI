@@ -8,7 +8,7 @@
 #define SEARCH_LANG_COUNT 4
 
 int web_research(const char *query, char *output, int output_size,
-                 int use_v2_model);
+                 int tokenizer_version);
 int web_search_requested(const char *input);
 int web_search_enabled(void);
 void web_search_set_enabled(int enabled);

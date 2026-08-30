@@ -45,4 +45,11 @@ void v2_scramble_words(const char *input, char *out, int out_size);
 void v2_extract_keyword_ext(const char *input, char *keyword, int kw_size);
 void v2_stream_print(const char *text);
 
+int v3_pick_response_mode(int pattern, const Features *feat, int turn_count);
+int v3_generate_corpus_response(int mode, const char *input, int pattern, const Features *feat, char *out, int out_size);
+void v3_inject_unicode(char *text, int text_size);
+void v3_scramble_words(const char *input, char *out, int out_size);
+void v3_extract_keyword_ext(const char *input, char *keyword, int kw_size);
+void v3_stream_print(const char *text);
+
 #endif
