@@ -164,6 +164,7 @@ static void inject_obsession(char *buf, int buf_size,
     char *words[256];
     int nwords = 0;
     char *p;
+    char *save;
     int i, written;
     int inject_at;
     int obslen;
@@ -173,10 +174,10 @@ static void inject_obsession(char *buf, int buf_size,
 
     strncpy(tmp, buf, sizeof(tmp) - 1);
     tmp[sizeof(tmp) - 1] = '\0';
-    p = strtok(tmp, " ");
+    p = strtok_r(tmp, " ", &save);
     while (p && nwords < 256) {
         words[nwords++] = p;
-        p = strtok(NULL, " ");
+        p = strtok_r(NULL, " ", &save);
     }
     if (nwords < 3) return;
 
@@ -316,6 +317,7 @@ static void track_topic(EngineState *state, const char *input) {
     char *words[64];
     int nwords = 0;
     char *p;
+    char *save;
     int i, j, found;
     int best_idx;
     int best_count;
@@ -323,10 +325,10 @@ static void track_topic(EngineState *state, const char *input) {
 
     strncpy(buf, input, 511);
     buf[511] = '\0';
-    p = strtok(buf, " \t\n.,!?;:'\"()[]{}");
+    p = strtok_r(buf, " \t\n.,!?;:'\"()[]{}", &save);
     while (p && nwords < 64) {
         if (!is_common_word(p)) words[nwords++] = p;
-        p = strtok(NULL, " \t\n.,!?;:'\"()[]{}");
+        p = strtok_r(NULL, " \t\n.,!?;:'\"()[]{}", &save);
     }
 
     for (i = 0; i < nwords; i++) {
@@ -373,15 +375,16 @@ static void absorb_words(EngineState *state, const char *input) {
     char *words[64];
     int nwords = 0;
     char *p;
+    char *save;
     int i, j, found;
     int wlen;
 
     strncpy(buf, input, 511);
     buf[511] = '\0';
-    p = strtok(buf, " \t\n.,!?;:'\"()[]{}");
+    p = strtok_r(buf, " \t\n.,!?;:'\"()[]{}", &save);
     while (p && nwords < 64) {
         words[nwords++] = p;
-        p = strtok(NULL, " \t\n.,!?;:'\"()[]{}");
+        p = strtok_r(NULL, " \t\n.,!?;:'\"()[]{}", &save);
     }
 
     for (i = 0; i < nwords; i++) {

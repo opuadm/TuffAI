@@ -71,17 +71,18 @@ static int prefix_similarity(const char *left, const char *right) {
 static int fuzzy_word_score(const char *text, const char *query) {
     char copy[1024];
     char *word;
+    char *save;
     int best;
     int score;
 
     if (!text || strlen(text) >= sizeof(copy)) return 0;
     memcpy(copy, text, strlen(text) + 1);
     best = 0;
-    word = strtok(copy, " \t\n\r.,!?;:\"'()[]{}<>/\\|=+-*&%$#@`~");
+    word = strtok_r(copy, " \t\n\r.,!?;:\"'()[]{}<>/\\|=+-*&%$#@`~", &save);
     while (word) {
         score = prefix_similarity(word, query);
         if (score > best) best = score;
-        word = strtok(NULL, " \t\n\r.,!?;:\"'()[]{}<>/\\|=+-*&%$#@`~");
+        word = strtok_r(NULL, " \t\n\r.,!?;:\"'()[]{}<>/\\|=+-*&%$#@`~", &save);
     }
     return best;
 }
@@ -202,20 +203,21 @@ static void score_category(const KnowledgeCategory *category,
 static int split_words(const char *input, char words[][64]) {
     char copy[512];
     char *word;
+    char *save;
     int count;
     int length;
 
     strncpy(copy, input, sizeof(copy) - 1);
     copy[sizeof(copy) - 1] = '\0';
     count = 0;
-    word = strtok(copy, " \t\n\r.,!?;:\"'()[]{}<>/\\|=+-*&%$#@`~");
+    word = strtok_r(copy, " \t\n\r.,!?;:\"'()[]{}<>/\\|=+-*&%$#@`~", &save);
     while (word && count < 64) {
         length = (int)strlen(word);
         if (length > 0 && length < 64) {
             memcpy(words[count], word, length + 1);
             count++;
         }
-        word = strtok(NULL, " \t\n\r.,!?;:\"'()[]{}<>/\\|=+-*&%$#@`~");
+        word = strtok_r(NULL, " \t\n\r.,!?;:\"'()[]{}<>/\\|=+-*&%$#@`~", &save);
     }
     return count;
 }

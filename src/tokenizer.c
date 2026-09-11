@@ -440,6 +440,7 @@ int tokenize(const char *input, int *tokens, int max_tok) {
     int nwords = 0;
     int count = 0;
     char *p;
+    char *save;
     int pattern;
     int i, j;
     int bg;
@@ -461,10 +462,10 @@ int tokenize(const char *input, int *tokens, int max_tok) {
     strncpy(lower_buf, buf, 2047);
     lower_buf[2047] = '\0';
 
-    p = strtok(buf, " \t\n\r.,!?;:\"'()[]{}");
+    p = strtok_r(buf, " \t\n\r.,!?;:\"'()[]{}", &save);
     while (p && nwords < 256) {
         words[nwords++] = p;
-        p = strtok(NULL, " \t\n\r.,!?;:\"'()[]{}");
+        p = strtok_r(NULL, " \t\n\r.,!?;:\"'()[]{}", &save);
     }
 
     pattern = detect_pattern(input);
@@ -581,6 +582,7 @@ static int utf8_sequence_length(unsigned char first) {
 int v2_tokenize(const char *input, int *tokens, int max_tok) {
     char *buffer;
     char *word;
+    char *save;
     size_t input_length;
     int count;
     int index;
@@ -594,7 +596,7 @@ int v2_tokenize(const char *input, int *tokens, int max_tok) {
     if (!buffer) return 0;
     memcpy(buffer, input, input_length + 1);
     count = 0;
-    word = strtok(buffer, " \t\n\r.,!?;:\"'()[]{}");
+    word = strtok_r(buffer, " \t\n\r.,!?;:\"'()[]{}", &save);
     while (word && count < max_tok) {
         index = model_vocab_index(word, v2_vocab, V2_VOCAB_SIZE);
         if (index >= 0) {
@@ -610,7 +612,7 @@ int v2_tokenize(const char *input, int *tokens, int max_tok) {
                 tokens[count++] = (int)(hash % V2_VOCAB_SIZE);
             }
         }
-        word = strtok(NULL, " \t\n\r.,!?;:\"'()[]{}");
+        word = strtok_r(NULL, " \t\n\r.,!?;:\"'()[]{}", &save);
     }
     free(buffer);
     return count;
@@ -621,6 +623,7 @@ int v2_tokenize(const char *input, int *tokens, int max_tok) {
 int v3_tokenize(const char *input, int *tokens, int max_tok) {
     char *buffer;
     char *word;
+    char *save;
     size_t input_length;
     int count;
     int index;
@@ -634,7 +637,7 @@ int v3_tokenize(const char *input, int *tokens, int max_tok) {
     if (!buffer) return 0;
     memcpy(buffer, input, input_length + 1);
     count = 0;
-    word = strtok(buffer, " \t\n\r.,!?;:\"'()[]{}");
+    word = strtok_r(buffer, " \t\n\r.,!?;:\"'()[]{}", &save);
     while (word && count < max_tok) {
         index = model_vocab_index(word, v3_vocab, V3_VOCAB_SIZE);
         if (index >= 0) {
@@ -650,7 +653,7 @@ int v3_tokenize(const char *input, int *tokens, int max_tok) {
                 tokens[count++] = (int)(hash % V3_VOCAB_SIZE);
             }
         }
-        word = strtok(NULL, " \t\n\r.,!?;:\"'()[]{}");
+        word = strtok_r(NULL, " \t\n\r.,!?;:\"'()[]{}", &save);
     }
     free(buffer);
     return count;
@@ -741,6 +744,7 @@ void misidentify_topic(const char *input, char *out, int out_size) {
     char *words[64];
     int nwords;
     char *p;
+    char *save;
     int longest;
     int longest_len;
     int wlen;
@@ -768,10 +772,10 @@ void misidentify_topic(const char *input, char *out, int out_size) {
     strncpy(buf, lower, 2047);
     buf[2047] = '\0';
     nwords = 0;
-    p = strtok(buf, " \t\n.,!?;:'\"()[]{}");
+    p = strtok_r(buf, " \t\n.,!?;:'\"()[]{}", &save);
     while (p && nwords < 64) {
         if (strlen(p) > 2) words[nwords++] = p;
-        p = strtok(NULL, " \t\n.,!?;:'\"()[]{}");
+        p = strtok_r(NULL, " \t\n.,!?;:'\"()[]{}", &save);
     }
 
     for (i = 0; i + 1 < nwords; i++) {

@@ -12,6 +12,8 @@ int web_research(const char *query, char *output, int output_size,
 int web_search_requested(const char *input);
 int web_search_enabled(void);
 void web_search_set_enabled(int enabled);
+void web_search_set_local(int enabled);
+void web_search_clear_local(void);
 int web_search_take_used(void);
 
 int web_fetch_random(char *output, int output_size);

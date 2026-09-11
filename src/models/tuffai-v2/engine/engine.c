@@ -708,17 +708,18 @@ static void stream_generated_text(const EngineCallbacks *cb,
 }
 
 static int split_source_words(char *source, char **words,
-                              int maximum_words) {
+                               int maximum_words) {
     char *word;
+    char *save;
     int count;
 
     count = 0;
-    word = strtok(source,
-                  " \t\n\r.,!?;:\"'()[]{}<>/\\|=+*&%$#@`~");
+    word = strtok_r(source,
+                  " \t\n\r.,!?;:\"'()[]{}<>/\\|=+*&%$#@`~", &save);
     while (word && count < maximum_words) {
         if (word[0] && word[1]) words[count++] = word;
-        word = strtok(NULL,
-                      " \t\n\r.,!?;:\"'()[]{}<>/\\|=+*&%$#@`~");
+        word = strtok_r(NULL,
+                      " \t\n\r.,!?;:\"'()[]{}<>/\\|=+*&%$#@`~", &save);
     }
     return count;
 }
@@ -778,6 +779,7 @@ static void generate_text(EngineState *state, const float *feature_context,
     char prompt_buffer[512];
     char *prompt_words[64];
     char *prompt_word;
+    char *prompt_save;
     int prompt_word_count;
     int streamed_len;
     int streamed_words;
@@ -804,10 +806,10 @@ static void generate_text(EngineState *state, const float *feature_context,
     if (prompt && prompt[0]) {
         strncpy(prompt_buffer, prompt, sizeof(prompt_buffer) - 1);
         prompt_buffer[sizeof(prompt_buffer) - 1] = '\0';
-        prompt_word = strtok(prompt_buffer, " \t\n\r.,!?;:\"'()[]{}");
+        prompt_word = strtok_r(prompt_buffer, " \t\n\r.,!?;:\"'()[]{}", &prompt_save);
         while (prompt_word && prompt_word_count < 64) {
             prompt_words[prompt_word_count++] = prompt_word;
-            prompt_word = strtok(NULL, " \t\n\r.,!?;:\"'()[]{}");
+            prompt_word = strtok_r(NULL, " \t\n\r.,!?;:\"'()[]{}", &prompt_save);
         }
     }
     if (prompt_word_count > 0 && rng_range(100) < prompt_chance)

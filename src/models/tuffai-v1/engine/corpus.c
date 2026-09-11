@@ -90,6 +90,7 @@ void extract_keyword_ext(const char *input, char *keyword, int kw_size) {
     char *words[64];
     int nwords = 0;
     char *p;
+    char *save;
     int best = -1;
     int best_score = -1;
     int i, wlen, score;
@@ -101,10 +102,10 @@ void extract_keyword_ext(const char *input, char *keyword, int kw_size) {
     strncpy(buf, input, 2047);
     buf[2047] = '\0';
 
-    p = strtok(buf, " \t\n.,!?;:'\"()[]{}");
+    p = strtok_r(buf, " \t\n.,!?;:'\"()[]{}", &save);
     while (p && nwords < 64) {
         if (strlen(p) > 1) words[nwords++] = p;
-        p = strtok(NULL, " \t\n.,!?;:'\"()[]{}");
+        p = strtok_r(NULL, " \t\n.,!?;:'\"()[]{}", &save);
     }
 
     for (i = 0; i < nwords; i++) {
@@ -134,15 +135,16 @@ void scramble_words(const char *input, char *out, int out_size) {
     int nwords = 0;
     int i, j, written;
     char *p;
+    char *save;
     int wlen;
 
     strncpy(buf, input, 2047);
     buf[2047] = '\0';
 
-    p = strtok(buf, " \t\n");
+    p = strtok_r(buf, " \t\n", &save);
     while (p && nwords < 128) {
         words[nwords++] = p;
-        p = strtok(NULL, " \t\n");
+        p = strtok_r(NULL, " \t\n", &save);
     }
 
     for (i = nwords - 1; i > 0; i--) {

@@ -1,13 +1,15 @@
 CC = cc
 .DEFAULT_GOAL := all
-CFLAGS = -Wall -Wextra -std=c99 -pedantic -O3 -march=native -mtune=native -MMD -MP
-LDFLAGS = -lm -lncursesw -lcurl
+CFLAGS = -Wall -Wextra -std=c99 -pedantic -O3 -march=native -mtune=native -MMD -MP -I$(BUILDDIR) -D_POSIX_C_SOURCE=200809L
+LDFLAGS = -lm -lncursesw -lcurl -pthread
 SRCDIR = src
 BUILDDIR = build
 
 MODELS ?= v1,v2,v3
 
-SRCS = $(SRCDIR)/main.c $(SRCDIR)/net.c $(SRCDIR)/rng.c $(SRCDIR)/features.c $(SRCDIR)/tokenizer.c $(SRCDIR)/websearch.c $(SRCDIR)/markov.c $(SRCDIR)/version.c
+SRCS = $(SRCDIR)/main.c $(SRCDIR)/net.c $(SRCDIR)/rng.c $(SRCDIR)/features.c $(SRCDIR)/tokenizer.c $(SRCDIR)/websearch.c $(SRCDIR)/markov.c $(SRCDIR)/version.c $(SRCDIR)/webui.c
+WEB_ASSETS = $(SRCDIR)/web/index.html $(SRCDIR)/web/app.css $(SRCDIR)/web/app.js
+WEB_ASSET_HEADER = $(BUILDDIR)/webui_assets.h
 V1_DATA_SRCS = $(SRCDIR)/models/tuffai-v1/tech.c $(SRCDIR)/models/tuffai-v1/languages.c $(SRCDIR)/models/tuffai-v1/code.c $(SRCDIR)/models/tuffai-v1/general.c $(SRCDIR)/models/tuffai-v1/phrases.c $(SRCDIR)/models/tuffai-v1/vocab.c $(SRCDIR)/models/tuffai-v1/extra.c
 V1_ENGINE_SRCS = $(SRCDIR)/models/tuffai-v1/engine/engine.c $(SRCDIR)/models/tuffai-v1/engine/corpus.c
 V2_DATA_SRCS = $(SRCDIR)/models/tuffai-v2/tech.c $(SRCDIR)/models/tuffai-v2/languages.c $(SRCDIR)/models/tuffai-v2/code.c $(SRCDIR)/models/tuffai-v2/general.c $(SRCDIR)/models/tuffai-v2/phrases.c $(SRCDIR)/models/tuffai-v2/vocab.c $(SRCDIR)/models/tuffai-v2/extra.c $(SRCDIR)/models/tuffai-v2/opinions.c $(SRCDIR)/models/tuffai-v2/wrongfacts.c $(SRCDIR)/models/tuffai-v2/retrieval.c
@@ -56,6 +58,14 @@ $(BUILDDIR):
 
 $(TARGET): $(ALL_OBJS)
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
+
+$(WEB_ASSET_HEADER): $(WEB_ASSETS) | $(BUILDDIR)
+	xxd -i -n tuffai_web_index_html $(SRCDIR)/web/index.html > $@
+	xxd -i -n tuffai_web_app_css $(SRCDIR)/web/app.css >> $@
+	xxd -i -n tuffai_web_app_js $(SRCDIR)/web/app.js >> $@
+
+$(BUILDDIR)/webui.o: $(SRCDIR)/webui.c $(WEB_ASSET_HEADER) | $(BUILDDIR)
+	$(CC) $(CFLAGS) -c -o $@ $<
 
 $(BUILDDIR)/%.o: $(SRCDIR)/%.c | $(BUILDDIR)
 	$(CC) $(CFLAGS) -c -o $@ $<

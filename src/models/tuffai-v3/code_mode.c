@@ -52,11 +52,12 @@ static int extract_filename(const char *input, char *filename,
                             int filename_size) {
     char copy[512];
     char *word;
+    char *save;
     int length;
 
     strncpy(copy, input, sizeof(copy) - 1);
     copy[sizeof(copy) - 1] = '\0';
-    word = strtok(copy, " \t\r\n\"'`<>()[]{}:,;");
+    word = strtok_r(copy, " \t\r\n\"'`<>()[]{}:,;", &save);
     while (word) {
         length = (int)strlen(word);
         while (length > 0 && (word[length - 1] == '.' ||
@@ -68,7 +69,7 @@ static int extract_filename(const char *input, char *filename,
             filename[length] = '\0';
             return 1;
         }
-        word = strtok(NULL, " \t\r\n\"'`<>()[]{}:,;");
+        word = strtok_r(NULL, " \t\r\n\"'`<>()[]{}:,;", &save);
     }
     return 0;
 }
@@ -368,6 +369,15 @@ void v3_run_code_mode(EngineState *state, const EngineCallbacks *callbacks,
     }
     overwrite = contains_case(input, "overwrite") ||
                 contains_case(input, "replace");
+    if (content_length > 262144) {
+        snprintf(result, (size_t)result_size,
+                 "Refusing to write %s: composed output is too large (%lu bytes).",
+                 filename, (unsigned long)content_length);
+        free(content);
+        callbacks->show_status("");
+        callbacks->curs_set_fn(1);
+        return;
+    }
     if (!write_file(filename, content, overwrite, error, sizeof(error))) {
         snprintf(result, (size_t)result_size, "%s", error);
         free(content);

@@ -14,6 +14,7 @@
 #include <ctype.h>
 #include <limits.h>
 #include <math.h>
+#include <pthread.h>
 #include <wchar.h>
 #include <wctype.h>
 
@@ -59,7 +60,7 @@
 static unsigned char v3_glitch_token_mask[V3_VOCAB_SIZE];
 static unsigned char v3_glitch_token_variant[V3_VOCAB_SIZE];
 static int v3_glitch_token_partner[V3_VOCAB_SIZE];
-static int v3_glitch_tokens_initialized;
+static pthread_once_t v3_glitch_tokens_once = PTHREAD_ONCE_INIT;
 static const char *const v3_effort_modes[] = {
     "None", "Low", "Medium", "High", "Max"
 };
@@ -580,7 +581,6 @@ static void v3_initialize_glitch_tokens(void) {
     int token;
     int d;
 
-    if (v3_glitch_tokens_initialized) return;
     memset(v3_glitch_token_mask, 0, sizeof(v3_glitch_token_mask));
     memset(v3_glitch_token_variant, 0, sizeof(v3_glitch_token_variant));
     for (d = 0; d < EMBED_DIM; d++) {
@@ -608,7 +608,6 @@ static void v3_initialize_glitch_tokens(void) {
         v3_glitch_token_partner[best_token] =
             v3_nearest_glitch_partner(best_token);
     }
-    v3_glitch_tokens_initialized = 1;
 }
 
 static int v3_render_glitch_token(int token, char *word, int word_size) {
@@ -620,7 +619,7 @@ static int v3_render_glitch_token(int token, char *word, int word_size) {
     int copy_length;
     int variant;
 
-    if (!v3_glitch_tokens_initialized) v3_initialize_glitch_tokens();
+    pthread_once(&v3_glitch_tokens_once, v3_initialize_glitch_tokens);
     if (token < 0 || token >= V3_VOCAB_SIZE ||
         !v3_glitch_token_mask[token]) return 0;
     primary_length = sanitize_token(v3_vocab[token], primary,
@@ -933,6 +932,7 @@ static void generate_mixed_answer(const char *source, char *output,
     char changed[V3_WORD_LEN];
     char *words[512];
     char *word;
+    char *save;
     char *temporary;
     int word_count;
     int output_length;
@@ -945,10 +945,10 @@ static void generate_mixed_answer(const char *source, char *output,
     strncpy(copy, source, sizeof(copy) - 1);
     copy[sizeof(copy) - 1] = '\0';
     word_count = 0;
-    word = strtok(copy, " \t\r\n");
+    word = strtok_r(copy, " \t\r\n", &save);
     while (word && word_count < (int)(sizeof(words) / sizeof(words[0]))) {
         words[word_count++] = word;
-        word = strtok(NULL, " \t\r\n");
+        word = strtok_r(NULL, " \t\r\n", &save);
     }
     for (i = 0; i + 1 < word_count; i++) {
         current_has_digit = strpbrk(words[i], "0123456789") != NULL;
@@ -991,17 +991,18 @@ static void generate_mixed_answer(const char *source, char *output,
 }
 
 static int split_source_words(char *source, char **words,
-                              int maximum_words) {
+                               int maximum_words) {
     char *word;
+    char *save;
     int count;
 
     count = 0;
-    word = strtok(source,
-                  " \t\n\r.,!?;:\"'()[]{}<>/\\|=+*&%$#@`~");
+    word = strtok_r(source,
+                  " \t\n\r.,!?;:\"'()[]{}<>/\\|=+*&%$#@`~", &save);
     while (word && count < maximum_words) {
         if (word[0] && word[1]) words[count++] = word;
-        word = strtok(NULL,
-                      " \t\n\r.,!?;:\"'()[]{}<>/\\|=+*&%$#@`~");
+        word = strtok_r(NULL,
+                      " \t\n\r.,!?;:\"'()[]{}<>/\\|=+*&%$#@`~", &save);
     }
     return count;
 }
@@ -1061,6 +1062,7 @@ static void generate_text(EngineState *state, const float *feature_context,
     char prompt_buffer[512];
     char *prompt_words[64];
     char *prompt_word;
+    char *prompt_save;
     int prompt_word_count;
     int streamed_len;
     int streamed_words;
@@ -1087,10 +1089,10 @@ static void generate_text(EngineState *state, const float *feature_context,
     if (prompt && prompt[0]) {
         strncpy(prompt_buffer, prompt, sizeof(prompt_buffer) - 1);
         prompt_buffer[sizeof(prompt_buffer) - 1] = '\0';
-        prompt_word = strtok(prompt_buffer, " \t\n\r.,!?;:\"'()[]{}");
+        prompt_word = strtok_r(prompt_buffer, " \t\n\r.,!?;:\"'()[]{}", &prompt_save);
         while (prompt_word && prompt_word_count < 64) {
             prompt_words[prompt_word_count++] = prompt_word;
-            prompt_word = strtok(NULL, " \t\n\r.,!?;:\"'()[]{}");
+            prompt_word = strtok_r(NULL, " \t\n\r.,!?;:\"'()[]{}", &prompt_save);
         }
     }
     if (prompt_word_count > 0 && rng_range(100) < prompt_chance) {

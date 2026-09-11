@@ -1,0 +1,150 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="color-scheme" content="dark">
+<title>TuffAI API</title>
+<link rel="stylesheet" href="/assets/app.css">
+</head>
+<body>
+<header class="topbar">
+<div class="header-inner">
+<a class="brand" href="#docs" aria-label="TuffAI API documentation">Tuff<span>AI</span></a>
+<nav class="navigation" aria-label="Main navigation">
+<button class="active" type="button" data-view="docs">API Docs</button>
+<button type="button" data-view="playground" id="navChat" hidden>Chat</button>
+<button type="button" data-view="admin">Admin</button>
+</nav>
+</div>
+</header>
+<main id="docs" class="view docs">
+<div class="page-title">
+<div><h1>API documentation</h1><p>OpenAI-compatible chat completions, running locally. All <code>/v1</code> endpoints require authentication.</p></div>
+</div>
+<section class="doc-section">
+<h2>Base URL</h2>
+<div class="copy-field"><code id="baseUrl"></code><button type="button" data-copy="baseUrl">Copy</button></div>
+</section>
+<section class="doc-section">
+<h2>Authentication</h2>
+<p>Programmatic access requires an API key created in the <a href="#admin">Admin</a> panel. Send it as a Bearer token:</p>
+<pre><code>Authorization: Bearer tk_...</code></pre>
+<p>The browser chat is reserved for signed-in admins. Admin sessions are also accepted as Bearer tokens on <code>/v1</code> endpoints.</p>
+</section>
+<section class="doc-section">
+<h2>Endpoints</h2>
+<div class="endpoint"><span>GET</span><code>/v1/models</code><p>Lists the TuffAI models compiled into this binary. Requires an API key or admin session.</p></div>
+<div class="endpoint"><span>POST</span><code>/v1/chat/completions</code><p>Creates a chat completion or an SSE stream. Requires an API key or admin session.</p></div>
+</section>
+<section class="doc-section">
+<h2>Example request</h2>
+<pre><code id="curlExample">curl http://localhost:18298/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -H 'Authorization: Bearer tk_YOUR_KEY' \
+  -d '{
+    "model": "TuffAI-v3",
+    "messages": [
+      {"role": "system", "content": "Answer briefly."},
+      {"role": "user", "content": "Why is the sky blue?"}
+    ],
+    "temperature": 1.15,
+    "reasoning_effort": "Medium",
+    "stream": true
+  }'</code></pre>
+<button class="secondary copy-example" type="button" data-copy="curlExample">Copy example</button>
+</section>
+<section class="doc-section">
+<h2>Request parameters</h2>
+<div class="table-wrap">
+<table>
+<thead><tr><th>Field</th><th>Type</th><th>Description</th></tr></thead>
+<tbody>
+<tr><td><code>model</code></td><td>string</td><td>Model ID returned by <code>/v1/models</code>.</td></tr>
+<tr><td><code>messages</code></td><td>array</td><td>System, developer, user, assistant, and tool messages.</td></tr>
+<tr><td><code>temperature</code></td><td>number</td><td>Sampling temperature. Uses the selected model’s default when omitted.</td></tr>
+<tr><td><code>top_p</code></td><td>number</td><td>Nucleus sampling from 0 to 1.</td></tr>
+<tr><td><code>frequency_penalty</code></td><td>number</td><td>Reduces repeated token frequency.</td></tr>
+<tr><td><code>presence_penalty</code></td><td>number</td><td>Adjusts preference for already-present tokens.</td></tr>
+<tr><td><code>max_tokens</code></td><td>integer</td><td>Limits generated output.</td></tr>
+<tr><td><code>stream</code></td><td>boolean</td><td>Returns Server-Sent Events when true.</td></tr>
+<tr><td><code>noise</code></td><td>number</td><td>TuffAI sampling noise override.</td></tr>
+<tr><td><code>repetition_penalty</code></td><td>number</td><td>TuffAI repetition penalty override.</td></tr>
+<tr><td><code>reasoning_effort</code></td><td>string</td><td><code>None</code>, <code>Low</code>, <code>Medium</code>, <code>High</code>, or <code>Max</code> on supported models.</td></tr>
+<tr><td><code>web_search</code></td><td>boolean</td><td>Enables autonomous search for this request. May increase latency.</td></tr>
+</tbody>
+</table>
+</div>
+</section>
+<section class="doc-section">
+<h2>Thinking and streaming</h2>
+<p>Non-streaming responses include model thinking in <code>choices[0].message.reasoning_content</code>. Streaming responses emit it as <code>choices[0].delta.reasoning_content</code> before answer content when the model produces thoughts.</p>
+</section>
+</main>
+<main id="playground" class="view playground" hidden>
+<div class="page-title">
+<div><h1>Chat</h1><p>Admin-only. Send a request with its own model and generation options.</p></div>
+<button id="clearChat" class="quiet" type="button">Clear chat</button>
+</div>
+<div id="chatLock" class="lock" hidden>
+<p>Admin sign-in required. <button id="goAdmin" class="secondary" type="button">Go to Admin</button></p>
+</div>
+<section class="request-options" aria-label="Request options">
+<label>Model<select id="chatModel"></select></label>
+<label>Reasoning<select id="chatEffort"><option value="">Model default</option><option>None</option><option>Low</option><option>Medium</option><option>High</option><option>Max</option></select></label>
+<label>Temperature<input id="chatTemperature" type="number" min="0.002" max="10000" step="any" placeholder="Model default"></label>
+<label class="check"><input id="chatWebSearch" type="checkbox">Web search</label>
+<label class="system-option">System message<input id="chatSystem" type="text" placeholder="Use model default"></label>
+</section>
+<div id="messages" class="messages" aria-live="polite"><div class="message assistant"><b>TuffAI</b><p>Ready when you are.</p></div></div>
+<form id="chatForm" class="composer">
+<textarea id="chatInput" rows="3" maxlength="32768" placeholder="Message TuffAI…" required></textarea>
+<div><span>Streaming enabled</span><button class="primary" type="submit">Send</button></div>
+</form>
+</main>
+<main id="admin" class="view" hidden>
+<div class="page-title">
+<div><h1>Admin</h1><p>Password-protected panel for managing chat API keys.</p></div>
+<button id="adminLogout" class="quiet" type="button" hidden>Log out</button>
+</div>
+<section id="adminSetup" class="card" hidden aria-label="Admin setup">
+<h2>Initial setup</h2>
+<p class="muted">No admin password is set yet. Choose one (minimum 8 characters).</p>
+<label class="field">New password<input id="setupPassword" type="password" autocomplete="new-password" minlength="8"></label>
+<label class="field">Confirm password<input id="setupPasswordConfirm" type="password" autocomplete="new-password" minlength="8"></label>
+<div class="row"><button id="setupSave" class="primary" type="button">Set password</button></div>
+<p id="setupStatus" class="muted small"></p>
+</section>
+<section id="adminLogin" class="card" hidden aria-label="Admin login">
+<h2>Admin sign-in</h2>
+<p class="muted">Password only. No username. Signing in also unlocks the chat.</p>
+<label class="field">Password<input id="adminPassword" type="password" autocomplete="current-password"></label>
+<div class="row"><button id="adminLoginBtn" class="primary" type="button">Sign in</button></div>
+<p id="adminLoginStatus" class="muted small"></p>
+</section>
+<section id="adminPanel" hidden>
+<section class="card" aria-label="Create API key">
+<h2>API keys</h2>
+<div class="row">
+<label class="field inline">Key name<input id="newKeyName" type="text" placeholder="e.g. laptop" maxlength="48"></label>
+<button id="createKey" class="primary" type="button">Create key</button>
+</div>
+<p id="newKeyOutput" class="key-output" hidden></p>
+<p class="muted small">The full key is shown once after creation. Store it somewhere safe.</p>
+<div class="table-wrap"><table>
+<thead><tr><th>Name</th><th>Key</th><th>Created</th><th>Last used</th><th></th></tr></thead>
+<tbody id="keysBody"></tbody>
+</table></div>
+</section>
+<section class="card" aria-label="Change admin password">
+<h2>Change password</h2>
+<label class="field">Current password (optional)<input id="curPassword" type="password" autocomplete="current-password"></label>
+<label class="field">New password<input id="newAdminPassword" type="password" autocomplete="new-password" minlength="8"></label>
+<div class="row"><button id="changePassword" class="secondary" type="button">Change password</button></div>
+<p id="passwordStatus" class="muted small"></p>
+</section>
+</section>
+</main>
+<script src="/assets/app.js" defer></script>
+</body>
+</html>

@@ -25,7 +25,9 @@ typedef struct {
 } SearchBuffer;
 
 static int search_runtime_enabled = 1;
-static int search_was_used = 0;
+static __thread int search_tls_used = 0;
+static __thread int search_tls_override_active = 0;
+static __thread int search_tls_override_enabled = 0;
 
 static size_t search_write(void *contents, size_t size, size_t count,
                            void *user_data) {
@@ -61,6 +63,7 @@ static void json_escape(const char *input, char *output, int output_size) {
     int input_position;
     int output_position;
     unsigned char character;
+    static const char hexdigits[] = "0123456789abcdef";
 
     input_position = 0;
     output_position = 0;
@@ -73,6 +76,25 @@ static void json_escape(const char *input, char *output, int output_size) {
         } else if (character == '\n' && output_position < output_size - 2) {
             output[output_position++] = '\\';
             output[output_position++] = 'n';
+        } else if (character == '\r' && output_position < output_size - 2) {
+            output[output_position++] = '\\';
+            output[output_position++] = 'r';
+        } else if (character == '\t' && output_position < output_size - 2) {
+            output[output_position++] = '\\';
+            output[output_position++] = 't';
+        } else if (character == '\b' && output_position < output_size - 2) {
+            output[output_position++] = '\\';
+            output[output_position++] = 'b';
+        } else if (character == '\f' && output_position < output_size - 2) {
+            output[output_position++] = '\\';
+            output[output_position++] = 'f';
+        } else if (character < 32 && output_position < output_size - 6) {
+            output[output_position++] = '\\';
+            output[output_position++] = 'u';
+            output[output_position++] = '0';
+            output[output_position++] = '0';
+            output[output_position++] = hexdigits[character >> 4];
+            output[output_position++] = hexdigits[character & 15];
         } else if (character >= 32) {
             output[output_position++] = (char)character;
         }
@@ -80,44 +102,95 @@ static void json_escape(const char *input, char *output, int output_size) {
     output[output_position] = '\0';
 }
 
-static const char *json_string_after(const char *position, const char *key,
-                                     char *output, int output_size) {
-    char pattern[64];
-    const char *found;
-    const char *cursor;
+static int search_hex_value(char character) {
+    if (character >= '0' && character <= '9') return character - '0';
+    if (character >= 'a' && character <= 'f') return character - 'a' + 10;
+    if (character >= 'A' && character <= 'F') return character - 'A' + 10;
+    return -1;
+}
+
+static void search_emit_utf8(char *output, int output_size,
+                             int *position, int codepoint) {
+    if (codepoint < 0 || codepoint > 0x10FFFF ||
+        (codepoint >= 0xD800 && codepoint <= 0xDFFF))
+        codepoint = '?';
+    if (codepoint < 0x80) {
+        if (*position < output_size - 1)
+            output[(*position)++] = (char)codepoint;
+    } else if (codepoint < 0x800) {
+        if (*position < output_size - 2) {
+            output[(*position)++] = (char)(0xC0 | (codepoint >> 6));
+            output[(*position)++] = (char)(0x80 | (codepoint & 0x3F));
+        }
+    } else if (codepoint < 0x10000) {
+        if (*position < output_size - 3) {
+            output[(*position)++] = (char)(0xE0 | (codepoint >> 12));
+            output[(*position)++] = (char)(0x80 | ((codepoint >> 6) & 0x3F));
+            output[(*position)++] = (char)(0x80 | (codepoint & 0x3F));
+        }
+    } else {
+        if (*position < output_size - 4) {
+            output[(*position)++] = (char)(0xF0 | (codepoint >> 18));
+            output[(*position)++] = (char)(0x80 | ((codepoint >> 12) & 0x3F));
+            output[(*position)++] = (char)(0x80 | ((codepoint >> 6) & 0x3F));
+            output[(*position)++] = (char)(0x80 | (codepoint & 0x3F));
+        }
+    }
+}
+
+static const char *search_decode_string(const char *cursor, char *output,
+                                        int output_size) {
     int output_position;
     unsigned char character;
+    int codepoint;
 
-    snprintf(pattern, sizeof(pattern), "\"%s\"", key);
-    found = strstr(position, pattern);
-    if (!found) return NULL;
-    cursor = found + strlen(pattern);
-    while (*cursor && *cursor != ':') cursor++;
-    if (*cursor != ':') return NULL;
-    cursor++;
-    while (*cursor == ' ' || *cursor == '\t' || *cursor == '\r' ||
-           *cursor == '\n') cursor++;
-    if (*cursor != '"') return NULL;
-    cursor++;
     output_position = 0;
     while (*cursor && output_position < output_size - 1) {
         character = (unsigned char)*cursor++;
         if (character == '"') break;
-        if (character == '\\') {
-            character = (unsigned char)*cursor++;
-            if (!character) break;
-            if (character == 'n' || character == 'r' || character == 't') {
-                output[output_position++] = ' ';
-                continue;
-            }
-            if (character == 'u') {
-                if (cursor[0] && cursor[1] && cursor[2] && cursor[3])
-                    cursor += 4;
+        if (character != '\\') {
+            output[output_position++] = (char)character;
+            continue;
+        }
+        character = (unsigned char)*cursor++;
+        if (!character) break;
+        if (character == 'n' || character == 'r' || character == 't' ||
+            character == 'b' || character == 'f') {
+            output[output_position++] = ' ';
+        } else if (character == 'u') {
+            int h0 = search_hex_value(cursor[0]);
+            int h1 = search_hex_value(cursor[1]);
+            int h2 = search_hex_value(cursor[2]);
+            int h3 = search_hex_value(cursor[3]);
+            if (h0 < 0 || h1 < 0 || h2 < 0 || h3 < 0) {
                 output[output_position++] = '?';
                 continue;
             }
+            codepoint = h0 * 4096 + h1 * 256 + h2 * 16 + h3;
+            cursor += 4;
+            if (codepoint >= 0xD800 && codepoint <= 0xDBFF &&
+                cursor[0] == '\\' && cursor[1] == 'u') {
+                int l0 = search_hex_value(cursor[2]);
+                int l1 = search_hex_value(cursor[3]);
+                int l2 = search_hex_value(cursor[4]);
+                int l3 = search_hex_value(cursor[5]);
+                if (l0 >= 0 && l1 >= 0 && l2 >= 0 && l3 >= 0) {
+                    int low = l0 * 4096 + l1 * 256 + l2 * 16 + l3;
+                    if (low >= 0xDC00 && low <= 0xDFFF) {
+                        codepoint = 0x10000 + ((codepoint - 0xD800) << 10) +
+                                    (low - 0xDC00);
+                        cursor += 6;
+                    }
+                }
+            }
+            if (output_size - output_position - 1 > 0)
+                search_emit_utf8(output, output_size,
+                                 &output_position, codepoint);
+        } else if (character == '/') {
+            output[output_position++] = '/';
+        } else {
+            output[output_position++] = (char)character;
         }
-        output[output_position++] = (char)character;
     }
     output[output_position] = '\0';
     return cursor;
@@ -144,13 +217,177 @@ static void strip_markup(char *text) {
     *write_position = '\0';
 }
 
+static const char *search_match_close(const char *open, char open_char,
+                                      char close_char) {
+    const char *cursor;
+    int depth;
+    int in_string;
+    int escaped;
+
+    if (!open || *open != open_char) return NULL;
+    cursor = open;
+    depth = 0;
+    in_string = 0;
+    escaped = 0;
+    while (*cursor) {
+        if (in_string) {
+            if (!escaped && *cursor == '"') in_string = 0;
+            if (!escaped && *cursor == '\\') escaped = 1;
+            else escaped = 0;
+        } else if (*cursor == '"') {
+            in_string = 1;
+        } else if (*cursor == open_char) {
+            depth++;
+        } else if (*cursor == close_char) {
+            depth--;
+            if (depth == 0) return cursor;
+        }
+        cursor++;
+    }
+    return NULL;
+}
+
+static const char *search_find_key(const char *json, const char *end,
+                                   const char *key) {
+    size_t key_length;
+    const char *cursor;
+    const char *after;
+    int escaped;
+
+    if (!json || !key) return NULL;
+    key_length = strlen(key);
+    cursor = json;
+    while (*cursor && (!end || cursor < end)) {
+        if (*cursor != '"') {
+            cursor++;
+            continue;
+        }
+        cursor++;
+        after = cursor;
+        escaped = 0;
+        while (*after && (!end || after < end)) {
+            if (!escaped && *after == '"') break;
+            if (!escaped && *after == '\\') escaped = 1;
+            else escaped = 0;
+            after++;
+        }
+        if (!*after || (end && after >= end)) return NULL;
+        if ((size_t)(after - cursor) == key_length &&
+            memcmp(cursor, key, key_length) == 0) {
+            after++;
+            while (*after == ' ' || *after == '\t' || *after == '\r' ||
+                   *after == '\n') after++;
+            if (*after == ':') {
+                after++;
+                while (*after == ' ' || *after == '\t' || *after == '\r' ||
+                       *after == '\n') after++;
+                return after;
+            }
+        }
+        cursor = after + 1;
+    }
+    return NULL;
+}
+
+static int search_read_field(const char *object, const char *object_end,
+                             const char *key, char *output, int output_size) {
+    const char *value;
+
+    value = search_find_key(object, object_end, key);
+    if (!value || *value != '"') return 0;
+    search_decode_string(value + 1, output, output_size);
+    return 1;
+}
+
+static int parse_search_result_object(const char *object,
+                                      const char *object_end,
+                                      SearchResult *result) {
+    result->title[0] = '\0';
+    result->url[0] = '\0';
+    result->description[0] = '\0';
+    search_read_field(object, object_end, "title", result->title,
+                      sizeof(result->title));
+    search_read_field(object, object_end, "url", result->url,
+                      sizeof(result->url));
+    search_read_field(object, object_end, "description", result->description,
+                      sizeof(result->description));
+    strip_markup(result->title);
+    strip_markup(result->description);
+    return result->title[0] && result->url[0];
+}
+
+static int parse_search_results_array(const char *array_open,
+                                      SearchResult *results, int count,
+                                      int maximum_results) {
+    const char *cursor;
+    const char *item_end;
+
+    cursor = array_open + 1;
+    while (count < maximum_results && *cursor) {
+        while (*cursor == ' ' || *cursor == '\t' || *cursor == '\r' ||
+               *cursor == '\n' || *cursor == ',') cursor++;
+        if (*cursor == ']') break;
+        if (*cursor != '{') {
+            if (!*cursor) break;
+            cursor++;
+            continue;
+        }
+        item_end = search_match_close(cursor, '{', '}');
+        if (!item_end) break;
+        if (parse_search_result_object(cursor, item_end,
+                                       &results[count]))
+            count++;
+        cursor = item_end + 1;
+    }
+    return count;
+}
+
+static int parse_search_response(const char *json, SearchResult *results,
+                                 int maximum_results, int *more_results) {
+    const char *value;
+    const char *results_end;
+    const char *web_value;
+    const char *web_end;
+    const char *array_value;
+    const char *array_end;
+
+    if (more_results) {
+        *more_results = 0;
+        value = search_find_key(json, NULL, "more_results_available");
+        if (value && strncmp(value, "true", 4) == 0) *more_results = 1;
+    }
+    if (!json || maximum_results <= 0) return 0;
+    value = search_find_key(json, NULL, "results");
+    if (!value) return 0;
+    if (*value == '[') {
+        array_end = search_match_close(value, '[', ']');
+        if (!array_end) return 0;
+        return parse_search_results_array(value, results, 0,
+                                          maximum_results);
+    }
+    if (*value != '{') return 0;
+    results_end = search_match_close(value, '{', '}');
+    if (!results_end) return 0;
+    web_value = search_find_key(value, results_end, "web");
+    if (!web_value || *web_value != '{') return 0;
+    web_end = search_match_close(web_value, '{', '}');
+    if (!web_end) return 0;
+    array_value = search_find_key(web_value, web_end, "results");
+    if (!array_value || *array_value != '[') return 0;
+    array_end = search_match_close(array_value, '[', ']');
+    if (!array_end) return 0;
+    return parse_search_results_array(array_value, results, 0,
+                                      maximum_results);
+}
+
 static int request_search_json(const char *query, SearchBuffer *response,
-                               int use_brave_engine) {
+                               const char *engine, int page) {
     CURL *curl;
     CURLcode result;
     struct curl_slist *headers;
     char escaped_query[2048];
-    char request_body[2304];
+    char request_body[2320];
+    char page_number[16];
     long status_code;
 
     response->data = (char *)malloc(4096);
@@ -159,14 +396,17 @@ static int request_search_json(const char *query, SearchBuffer *response,
     response->capacity = 4096;
     response->data[0] = '\0';
     json_escape(query, escaped_query, sizeof(escaped_query));
-    if (use_brave_engine)
+    snprintf(page_number, sizeof(page_number), "%d", page < 0 ? 0 : page);
+    if (engine && engine[0])
         snprintf(request_body, sizeof(request_body),
                  "{\"query\":\"%s\",\"type\":\"web\","
-                 "\"page\":0}", escaped_query);
+                 "\"page\":%s,\"engine\":\"%s\"}",
+                 escaped_query, page_number, engine);
     else
         snprintf(request_body, sizeof(request_body),
                  "{\"query\":\"%s\",\"type\":\"web\","
-                 "\"page\":0,\"engine\":\"kagi\"}", escaped_query);
+                 "\"page\":%s}",
+                 escaped_query, page_number);
     curl = curl_easy_init();
     if (!curl) {
         free(response->data);
@@ -201,49 +441,18 @@ static int request_search_json(const char *query, SearchBuffer *response,
     return 1;
 }
 
-static int parse_structured_results(const char *json, SearchResult *results,
-                                    int maximum_results) {
-    const char *cursor;
-    const char *title_key;
-    const char *next_title;
-    const char *url_key;
-    const char *description_key;
-    const char *after_title;
-    int result_count;
+static int fetch_search_page(const char *query, const char *engine, int page,
+                             SearchResult *results, int count,
+                             int maximum_results, int *more_results) {
+    SearchBuffer response;
+    int parsed;
 
-    cursor = json;
-    result_count = 0;
-    while (result_count < maximum_results) {
-        title_key = strstr(cursor, "\"title\"");
-        if (!title_key) break;
-        next_title = strstr(title_key + 7, "\"title\"");
-        after_title = json_string_after(
-            title_key, "title", results[result_count].title,
-            sizeof(results[result_count].title));
-        if (!after_title) {
-            cursor = title_key + 7;
-            continue;
-        }
-        results[result_count].url[0] = '\0';
-        results[result_count].description[0] = '\0';
-        url_key = strstr(after_title, "\"url\"");
-        description_key = strstr(after_title, "\"description\"");
-        if (url_key && (!next_title || url_key < next_title))
-            json_string_after(url_key, "url", results[result_count].url,
-                              sizeof(results[result_count].url));
-        if (description_key &&
-            (!next_title || description_key < next_title))
-            json_string_after(description_key, "description",
-                              results[result_count].description,
-                              sizeof(results[result_count].description));
-        strip_markup(results[result_count].title);
-        strip_markup(results[result_count].description);
-        if (results[result_count].title[0] &&
-            results[result_count].url[0])
-            result_count++;
-        cursor = after_title;
-    }
-    return result_count;
+    if (!request_search_json(query, &response, engine, page)) return -1;
+    parsed = parse_search_response(response.data, results + count,
+                                   maximum_results - count, more_results);
+    free(response.data);
+    if (parsed < 0) return -1;
+    return count + parsed;
 }
 
 static int word_matches(const char *input, const char *word) {
@@ -486,7 +695,6 @@ static float score_result(const char *query, const SearchResult *result,
 
 int web_research(const char *query, char *output, int output_size,
                  int tokenizer_version) {
-    SearchBuffer response;
     SearchBuffer page;
     SearchResult results[SEARCH_RESULT_LIMIT];
     char selected_query[2048];
@@ -505,20 +713,32 @@ int web_research(const char *query, char *output, int output_size,
     int desired_pages;
     int page_text_length;
     int page_start;
+    int more_results;
+    const char *engine;
 
-    if (!search_runtime_enabled) return 0;
+    if (!web_search_enabled()) return 0;
     if (!query || !query[0] || !output || output_size <= 0) return -1;
     output[0] = '\0';
     select_query_text(query, selected_query, sizeof(selected_query));
-    if (!request_search_json(selected_query, &response, 0)) return -1;
-    result_count = parse_structured_results(response.data, results,
-                                            SEARCH_RESULT_LIMIT);
-    free(response.data);
+    engine = "kagi";
+    more_results = 0;
+    result_count = fetch_search_page(selected_query, engine, 0, results, 0,
+                                     SEARCH_RESULT_LIMIT, &more_results);
+    if (result_count < 0) return -1;
     if (result_count <= 0) {
-        if (!request_search_json(selected_query, &response, 1)) return -1;
-        result_count = parse_structured_results(response.data, results,
-                                                SEARCH_RESULT_LIMIT);
-        free(response.data);
+        engine = NULL;
+        more_results = 0;
+        result_count = fetch_search_page(selected_query, engine, 0, results,
+                                         0, SEARCH_RESULT_LIMIT,
+                                         &more_results);
+        if (result_count < 0) return -1;
+    }
+    if (more_results && result_count > 0 &&
+        result_count < SEARCH_RESULT_LIMIT) {
+        int grown = fetch_search_page(selected_query, engine, 1, results,
+                                      result_count, SEARCH_RESULT_LIMIT,
+                                      &more_results);
+        if (grown > result_count) result_count = grown;
     }
     if (result_count <= 0) return 0;
     for (i = 0; i < result_count; i++)
@@ -575,11 +795,12 @@ int web_research(const char *query, char *output, int output_size,
             }
         }
     }
-    if (loaded_count > 0) search_was_used = 1;
+    if (loaded_count > 0) search_tls_used = 1;
     return loaded_count;
 }
 
 int web_search_enabled(void) {
+    if (search_tls_override_active) return search_tls_override_enabled;
     return search_runtime_enabled;
 }
 
@@ -587,11 +808,21 @@ void web_search_set_enabled(int enabled) {
     search_runtime_enabled = enabled ? 1 : 0;
 }
 
+void web_search_set_local(int enabled) {
+    search_tls_override_active = 1;
+    search_tls_override_enabled = enabled ? 1 : 0;
+}
+
+void web_search_clear_local(void) {
+    search_tls_override_active = 0;
+    search_tls_override_enabled = 0;
+}
+
 int web_search_take_used(void) {
     int used;
 
-    used = search_was_used;
-    search_was_used = 0;
+    used = search_tls_used;
+    search_tls_used = 0;
     return used;
 }
 

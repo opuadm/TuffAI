@@ -339,20 +339,21 @@ static void score_category(const KnowledgeCategory *category,
 static int split_words(const char *input, char words[][64]) {
     char copy[512];
     char *word;
+    char *save;
     int count;
     int length;
 
     strncpy(copy, input, sizeof(copy) - 1);
     copy[sizeof(copy) - 1] = '\0';
     count = 0;
-    word = strtok(copy, " \t\n\r.,!?;:\"'()[]{}<>/\\|=+-*&%$#@`~");
+    word = strtok_r(copy, " \t\n\r.,!?;:\"'()[]{}<>/\\|=+-*&%$#@`~", &save);
     while (word && count < 64) {
         length = (int)strlen(word);
         if (length > 0 && length < 64) {
             memcpy(words[count], word, length + 1);
             count++;
         }
-        word = strtok(NULL, " \t\n\r.,!?;:\"'()[]{}<>/\\|=+-*&%$#@`~");
+        word = strtok_r(NULL, " \t\n\r.,!?;:\"'()[]{}<>/\\|=+-*&%$#@`~", &save);
     }
     return count;
 }

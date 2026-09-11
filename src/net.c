@@ -45,8 +45,8 @@ static float attention_value[EMBED_DIM][EMBED_DIM];
 static float attention_output[EMBED_DIM][EMBED_DIM];
 static float position_embed[NET_CONTEXT_MAX][EMBED_DIM];
 
-static int last_words[64];
-static int last_words_n = 0;
+static __thread int last_words[64];
+static __thread int last_words_n = 0;
 
 static float fast_tanh_value(float value) {
     float magnitude;
